@@ -150,6 +150,15 @@ def _print_prompt(messages: list[dict]) -> None:
     print("=" * 70)
 
 
+def _print_generated(code: str) -> None:
+    """Print the model's decoded output (after code-fence stripping)."""
+    print("\n" + "-" * 70)
+    print("GENERATED (model output, grammar-constrained)")
+    print("-" * 70)
+    print(code if code else "<empty>")
+    print("-" * 70)
+
+
 def run(
     seeds_path: Path,
     data_dir: Path,
@@ -217,6 +226,9 @@ def run(
                 "latency_sec": latency,
             })
             continue
+
+        if show_prompt:
+            _print_generated(generated)
 
         result, actual_df = evaluate_one(rec, generated, tables, expected.get(rec["id"]))
         result["latency_sec"] = latency
