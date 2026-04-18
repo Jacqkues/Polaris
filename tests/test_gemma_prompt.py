@@ -158,17 +158,22 @@ def test_format_user_turn_preserves_special_chars_in_question() -> None:
 # benchmark_gemma.py — AST-level structure
 # ---------------------------------------------------------------------------
 
-def _parse_benchmark_gemma() -> ast.Module:
-    src = (REPO_ROOT / "benchmark_gemma.py").read_text()
+def _parse_file(name: str) -> ast.Module:
+    src = (REPO_ROOT / name).read_text()
     return ast.parse(src)
 
 
 def test_benchmark_gemma_parses() -> None:
-    _parse_benchmark_gemma()  # raises if syntax error
+    _parse_file("benchmark_gemma.py")  # raises if syntax error
+
+
+def test_gemma_model_parses() -> None:
+    _parse_file("gemma_model.py")
 
 
 def test_gemma_model_class_has_required_methods() -> None:
-    tree = _parse_benchmark_gemma()
+    """GemmaModel is now in gemma_model.py (extracted from benchmark_gemma.py)."""
+    tree = _parse_file("gemma_model.py")
     methods: dict[str, list[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "GemmaModel":
@@ -177,19 +182,31 @@ def test_gemma_model_class_has_required_methods() -> None:
                     methods[item.name] = [a.arg for a in item.args.args]
             break
     else:
-        raise AssertionError("class GemmaModel not found in benchmark_gemma.py")
+        raise AssertionError("class GemmaModel not found in gemma_model.py")
 
-    for required in ("__init__", "_build_prompt", "_ensure_outlines", "generate", "generate_constrained"):
+    for required in (
+        "__init__",
+        "_build_prompt",
+        "_ensure_outlines",
+        "generate",
+        "generate_constrained",
+        "generate_with_feedback",
+    ):
         assert required in methods, f"GemmaModel missing method: {required}"
 
     # generate_constrained must accept the same (message, tables) contract as generate
     assert "message" in methods["generate_constrained"]
     assert "tables" in methods["generate_constrained"]
 
+    # generate_with_feedback must accept previous_code + feedback in addition to message/tables
+    fb_args = methods["generate_with_feedback"]
+    for required_arg in ("message", "tables", "previous_code", "feedback"):
+        assert required_arg in fb_args, f"generate_with_feedback missing arg: {required_arg}"
+
 
 def test_cli_has_constrained_flag() -> None:
     """Ensure main() registered --constrained via add_argument."""
-    tree = _parse_benchmark_gemma()
+    tree = _parse_file("benchmark_gemma.py")
     flags_seen: set[str] = set()
     for node in ast.walk(tree):
         if (
@@ -204,8 +221,21 @@ def test_cli_has_constrained_flag() -> None:
         assert expected in flags_seen, f"CLI flag missing: {expected}"
 
 
-def test_benchmark_gemma_imports_expected_symbols() -> None:
-    tree = _parse_benchmark_gemma()
+def test_benchmark_gemma_imports_gemma_model() -> None:
+    """After refactor, benchmark_gemma.py imports GemmaModel from gemma_model."""
+    tree = _parse_file("benchmark_gemma.py")
+    imports: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imports.setdefault(node.module, set()).update(n.name for n in node.names)
+
+    assert "gemma_model" in imports, "benchmark_gemma.py should import from gemma_model"
+    assert "GemmaModel" in imports["gemma_model"]
+
+
+def test_gemma_model_imports_prompt_and_grammar() -> None:
+    """gemma_model.py is the central consumer of gemma_prompt + polars_grammar."""
+    tree = _parse_file("gemma_model.py")
     imports: dict[str, set[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
@@ -214,7 +244,7 @@ def test_benchmark_gemma_imports_expected_symbols() -> None:
     assert "gemma_prompt" in imports, "should import from gemma_prompt"
     for sym in ("FEWSHOT", "SYSTEM_PROMPT", "format_user_turn"):
         assert sym in imports["gemma_prompt"], f"missing symbol {sym}"
-    assert "dataset.polars_grammar" in imports, "should import build_grammar for --constrained"
+    assert "dataset.polars_grammar" in imports, "should import build_grammar"
     assert "build_grammar" in imports["dataset.polars_grammar"]
 
 

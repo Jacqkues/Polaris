@@ -16,8 +16,9 @@ Differences vs benchmark.py:
 Usage:
   python benchmark_gemma.py --oracle --limit 3   # validate harness
   python benchmark_gemma.py --limit 3            # smoke test with Gemma
-  python benchmark_gemma.py --constrained        # + grammar-constrained decoding
-  python benchmark_gemma.py                      # full benchmark
+  python benchmark_gemma.py --constrained        # grammar-constrained only
+  python benchmark_gemma.py --cascade            # full cascade (fast→constrained→retry)
+  python benchmark_gemma.py --cascade --no-constrained  # cascade without L2
   python benchmark_gemma.py --out runs/gemma_promptv2.json
 """
 import argparse
@@ -29,95 +30,13 @@ from dataclasses import asdict
 from pathlib import Path
 
 import polars as pl
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dataset.compare import ComparisonResult, compare_dataframes
 from dataset.executor import execute_code, load_tpch
-from dataset.polars_grammar import build_grammar
-from gemma_prompt import FEWSHOT, SYSTEM_PROMPT, format_user_turn
+from gemma_cascade import CONSTRAINED_AVAILABLE, run_cascade
+from gemma_model import DEFAULT_MODEL_NAME, GemmaModel
 
-MODEL_NAME = "google/gemma-4-E2B-it"
-
-
-def strip_code_fence(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```python"):
-        text = text[len("```python"):].strip()
-    elif text.startswith("```"):
-        text = text[len("```"):].strip()
-    if text.endswith("```"):
-        text = text[:-3].strip()
-    return text
-
-
-class GemmaModel:
-    def __init__(self, name: str = MODEL_NAME):
-        print(f"Loading {name}...")
-        # Text-only path: AutoTokenizer avoids pulling the multimodal chain
-        # (VideoProcessor -> torchvision). We never send images/audio here.
-        self.tokenizer = AutoTokenizer.from_pretrained(name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            name, dtype=torch.float16, device_map="auto"
-        )
-        self.model.eval()
-        self.eos_token_id = self.tokenizer.eos_token_id
-        self._outlines_model = None  # lazy: only loaded if --constrained is used
-
-    def _build_prompt(self, message: str, tables: dict) -> str:
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for fs_tables, fs_q, fs_a in FEWSHOT:
-            messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q)})
-            messages.append({"role": "assistant", "content": fs_a})
-        messages.append({"role": "user", "content": format_user_turn(tables, message)})
-        return self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-
-    def _ensure_outlines(self) -> None:
-        if self._outlines_model is None:
-            import outlines
-            self._outlines_model = outlines.from_transformers(self.model, self.tokenizer)
-
-    @torch.inference_mode()
-    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
-        text = self._build_prompt(message, tables)
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
-        outputs = self.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=self.eos_token_id,
-            eos_token_id=self.eos_token_id,
-            use_cache=True,
-        )
-        response = self.tokenizer.decode(
-            outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        )
-        return strip_code_fence(response)
-
-    @torch.inference_mode()
-    def generate_constrained(
-        self, message: str, tables: dict, max_new_tokens: int = 512
-    ) -> str:
-        """Grammar-constrained generation via Outlines CFG.
-
-        Builds a per-request Polars grammar with the request's table/column
-        names injected so the decoder can only emit structurally-valid Polars
-        method chains over real tables/columns — physically prevents API
-        hallucinations like `with_column` or `pl.desc`.
-        """
-        from outlines.types import CFG
-        self._ensure_outlines()
-        prompt = self._build_prompt(message, tables)
-        grammar = build_grammar(tables)
-        response = self._outlines_model(
-            prompt, CFG(grammar), max_new_tokens=max_new_tokens
-        )
-        return strip_code_fence(response)
+MODEL_NAME = DEFAULT_MODEL_NAME
 
 
 def evaluate_one(
@@ -235,6 +154,26 @@ def report(results: list[dict], debug: bool = False) -> None:
         if stage_counts.get(stage):
             print(f"    {stage:15s}  {stage_counts[stage]}")
 
+    # Cascade breakdown (only present when --cascade was used)
+    cascade_counts: dict[str, int] = defaultdict(int)
+    for r in results:
+        level = r.get("cascade_level")
+        if level:
+            cascade_counts[level] += 1
+    if cascade_counts:
+        print("\n  Cascade levels:")
+        for level in ("fast", "constrained", "retry", "fallback"):
+            if cascade_counts.get(level):
+                # match rate per level to see which tier actually produces matches
+                matches_at_level = sum(
+                    1 for r in results
+                    if r.get("cascade_level") == level and r["matches"]
+                )
+                print(
+                    f"    {level:12s}  {cascade_counts[level]:>3d}  "
+                    f"(matched: {matches_at_level}/{cascade_counts[level]})"
+                )
+
     failures = [r for r in results if not r["matches"]]
     if failures:
         print(f"\n  Failures ({len(failures)}):")
@@ -288,6 +227,8 @@ def run(
     limit: int | None,
     oracle: bool,
     constrained: bool = False,
+    cascade: bool = False,
+    disable_constrained: bool = False,
 ) -> list[dict]:
     records = [
         json.loads(line) for line in seeds_path.read_text().splitlines() if line.strip()
@@ -320,12 +261,24 @@ def run(
         }
 
         t0 = time.time()
+        cascade_level = None
+        cascade_l1_reason = None
         if oracle:
             generated = rec["reference_code"]
             gen_error = None
         else:
             try:
-                if constrained:
+                if cascade:
+                    cascade_result = run_cascade(
+                        model,
+                        rec["question"],
+                        prompt_schemas,
+                        disable_constrained=disable_constrained,
+                    )
+                    generated = cascade_result.code
+                    cascade_level = cascade_result.level
+                    cascade_l1_reason = cascade_result.l1_reason
+                elif constrained:
                     generated = model.generate_constrained(rec["question"], prompt_schemas)
                 else:
                     generated = model.generate(rec["question"], prompt_schemas)
@@ -349,12 +302,16 @@ def run(
                 "comparison": None,
                 "error": f"generation failed: {gen_error}",
                 "latency_sec": latency,
+                "cascade_level": cascade_level,
+                "cascade_l1_reason": cascade_l1_reason,
             }
             results.append(result)
             continue
 
         result, actual_df = evaluate_one(rec, generated, tables, expected.get(rec["id"]))
         result["latency_sec"] = latency
+        result["cascade_level"] = cascade_level
+        result["cascade_l1_reason"] = cascade_l1_reason
         results.append(result)
 
         if debug_dir is not None:
@@ -384,6 +341,13 @@ def main() -> int:
     p.add_argument("--constrained", action="store_true",
                    help="Use grammar-constrained generation (Outlines CFG) with a "
                         "Polars grammar built per-example from the request's schema")
+    p.add_argument("--cascade", action="store_true",
+                   help="Use the full fast->constrained->retry cascade. Supersedes "
+                        "--constrained. Constrained level is auto-skipped if "
+                        "llguidance/outlines aren't installed.")
+    p.add_argument("--no-constrained", action="store_true",
+                   help="With --cascade: force skip the constrained level "
+                        "(L2) even if available. Cascade becomes fast->retry only.")
     p.add_argument("--debug", action="store_true",
                    help="Print full diff (code + previews) for each failure")
     p.add_argument("--debug-dir", type=Path, default=Path("runs/debug_gemma"),
@@ -396,12 +360,22 @@ def main() -> int:
 
     debug_dir = None if args.no_debug_dir else args.debug_dir
 
-    if args.oracle and args.constrained:
-        print("WARN: --constrained has no effect with --oracle; ignoring.")
+    if args.oracle and (args.constrained or args.cascade):
+        print("WARN: --constrained/--cascade has no effect with --oracle; ignoring.")
+
+    if args.cascade and args.constrained:
+        print("WARN: --constrained is absorbed into --cascade (L2); ignoring --constrained flag.")
+
+    if args.cascade:
+        backend = "available" if CONSTRAINED_AVAILABLE else "NOT available (L2 auto-skipped)"
+        print(f"[cascade] enabled. Constrained backend: {backend}. "
+              f"Disable L2 flag: {args.no_constrained}")
 
     results = run(
         args.seeds, args.data, args.expected, debug_dir, args.limit, args.oracle,
-        constrained=args.constrained,
+        constrained=args.constrained and not args.cascade,
+        cascade=args.cascade,
+        disable_constrained=args.no_constrained,
     )
     report(results, debug=args.debug)
 
