@@ -140,8 +140,8 @@ PROMPT = (
 )
 
 
-DEFAULT_REPO = "LiquidAI/LFM2.5-1.2B-Instruct-GGUF"
-DEFAULT_FILE = "LFM2.5-1.2B-Instruct-Q8_0.gguf"
+DEFAULT_REPO = "unsloth/gemma-4-E2B-it-GGUF"
+DEFAULT_FILE = "gemma-4-E2B-it-Q5_K_M.gguf"
 
 
 def _load_llm():
