@@ -2,23 +2,19 @@
 
 pygbnf builds a GBNF grammar that restricts the model to valid Polars method
 chains over the given schema. llama_cpp applies that grammar during inference.
+The GGUF model is downloaded automatically by llama_cpp on first run and cached
+under ~/.cache/huggingface/hub.
 
 Requires:
     uv pip install pygbnf llama-cpp-python huggingface-hub
 
 Run:
     python -m test_gram.test_gram
-
-Env vars:
-    GEMMA_REPO  — HF repo  (default: unsloth/gemma-4-E2B-it-GGUF)
-    GEMMA_FILE  — filename  (default: gemma-4-E2B-it-Q5_K_M.gguf)
-    GEMMA_GGUF  — local file path (overrides repo/file)
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -479,14 +475,9 @@ def build_gbnf(tables: dict) -> str:
 def _load_llm():
     from llama_cpp import Llama
 
-    local = os.environ.get("GEMMA_GGUF")
-    if local:
-        return Llama(model_path=local, n_ctx=4096, n_gpu_layers=-1, verbose=False)
-
-    repo = os.environ.get("GEMMA_REPO", DEFAULT_REPO)
-    fname = os.environ.get("GEMMA_FILE", DEFAULT_FILE)
     return Llama.from_pretrained(
-        repo_id=repo, filename=fname, n_ctx=4096, n_gpu_layers=-1, verbose=False
+        repo_id=DEFAULT_REPO, filename=DEFAULT_FILE,
+        n_ctx=4096, n_gpu_layers=-1, verbose=False,
     )
 
 
