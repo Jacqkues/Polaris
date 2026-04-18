@@ -160,10 +160,17 @@ def _render_select(op: SelectOp) -> str:
 
 
 def _render_join(op: JoinOp) -> str:
-    if op.on:
-        key = f'on="{op.on}"'
-    else:
+    on_val = op.on.strip()
+    # Model sometimes writes SQL-style "col1==col2" in the on field — split it.
+    if "==" in on_val and not op.left_on and not op.right_on:
+        left, right = on_val.split("==", 1)
+        key = f'left_on="{left.strip()}", right_on="{right.strip()}"'
+    elif on_val:
+        key = f'on="{on_val}"'
+    elif op.left_on or op.right_on:
         key = f'left_on="{op.left_on}", right_on="{op.right_on}"'
+    else:
+        key = f'on="{on_val}"'
     return f'.join({op.table}, {key}, how="{op.how}")'
 
 
@@ -179,7 +186,7 @@ def _render_with_columns(op: WithColumnsOp) -> str:
 
 
 def _render_head(op: HeadOp) -> str:
-    return f".head({op.n})"
+    return f".head({max(1, op.n)})"
 
 
 _RENDERERS = {
@@ -191,6 +198,50 @@ _RENDERERS = {
     "with_columns": _render_with_columns,
     "head": _render_head,
 }
+
+
+def _normalize_plan(plan: QueryPlan, tables: dict) -> QueryPlan:
+    """Fix common column-name hallucinations before code generation.
+
+    Builds the set of valid column names from `tables`, then walks every
+    column reference in the plan and applies cheap corrections:
+      - spaces → underscores  ("o totalprice" → "o_totalprice")
+    Leaves names that can't be fixed unchanged so the downstream error message
+    is still meaningful.
+    """
+    valid: set[str] = set()
+    for meta in tables.values():
+        cols = meta.get("columns", meta) if isinstance(meta, dict) else {}
+        if isinstance(cols, dict):
+            valid.update(cols.keys())
+    if not valid:
+        return plan
+
+    def fix(col: str) -> str:
+        if col in valid:
+            return col
+        candidate = col.replace(" ", "_")
+        return candidate if candidate in valid else col
+
+    data = plan.model_dump()
+    fixed_ops = []
+    for op in data.get("operations", []):
+        op = dict(op)
+        t = op.get("type")
+        if t == "filter":
+            op["conditions"] = [{**c, "column": fix(c["column"])} for c in op.get("conditions", [])]
+        elif t == "group_by":
+            op["columns"] = [fix(c) for c in op.get("columns", [])]
+            op["aggregations"] = [{**a, "column": fix(a["column"])} for a in op.get("aggregations", [])]
+        elif t == "sort":
+            op["columns"] = [{**sc, "name": fix(sc["name"])} for sc in op.get("columns", [])]
+        elif t == "select":
+            op["columns"] = [fix(c) for c in op.get("columns", [])]
+        elif t == "with_columns":
+            op["expressions"] = [{**e, "column": fix(e["column"])} for e in op.get("expressions", [])]
+        fixed_ops.append(op)
+    data["operations"] = fixed_ops
+    return QueryPlan.model_validate(data)
 
 
 def json_to_polars(plan: QueryPlan | dict) -> str:
@@ -293,7 +344,7 @@ class JsonQueryGenerator:
         messages.append({"role": "user", "content": f"{_format_schema(tables)}\n\nQuestion: {question}"})
         return messages
 
-    def _greedy(self, prompt: str, max_new_tokens: int = 768) -> str:
+    def _greedy(self, prompt: str, max_new_tokens: int = 7680) -> str:
         import torch
         with torch.inference_mode():
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
@@ -348,13 +399,14 @@ class JsonQueryGenerator:
         try:
             generator = outlines.Generator(self._outlines_model, QueryPlan)
             result: str = generator(prompt, max_new_tokens=768)
-            return QueryPlan.model_validate_json(result)
+            plan = QueryPlan.model_validate_json(result)
         except Exception as e:
             print(f"[json_gen] constrained failed ({type(e).__name__}: {e}), falling back to greedy")
+            # L2 — greedy + JSON extraction
+            raw = self._greedy(prompt, max_new_tokens=768)
+            plan = QueryPlan.model_validate_json(self._extract_json(raw))
 
-        # L2 — greedy + JSON extraction
-        raw = self._greedy(prompt, max_new_tokens=768)
-        return QueryPlan.model_validate_json(self._extract_json(raw))
+        return _normalize_plan(plan, tables)
 
     def generate_and_convert(self, tables: dict, question: str) -> tuple[QueryPlan, str]:
         """Generate a QueryPlan and convert it to Polars code. Returns (plan, code)."""
