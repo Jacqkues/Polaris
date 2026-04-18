@@ -7,7 +7,7 @@ LFM2 baseline in benchmark.py.
 
 Differences vs benchmark.py:
 - MODEL_NAME = "google/gemma-4-E2B-it"
-- GemmaModel uses AutoProcessor (multimodal-aware) + enable_thinking=False
+- GemmaModel uses AutoTokenizer (text-only path, avoids multimodal deps) + enable_thinking=False
 - Enriched SYSTEM_PROMPT covering the API hallucinations observed on the baseline
   (with_column, pl.desc, .dense, .str.contains, df[bool], .len)
 - Extra few-shot covering the window/rank pattern (weakest tag for Gemma baseline)
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import polars as pl
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dataset.compare import ComparisonResult, compare_dataframes
 from dataset.executor import execute_code, load_tpch
@@ -54,12 +54,14 @@ def strip_code_fence(text: str) -> str:
 class GemmaModel:
     def __init__(self, name: str = MODEL_NAME):
         print(f"Loading {name}...")
-        self.processor = AutoProcessor.from_pretrained(name)
+        # Text-only path: AutoTokenizer avoids pulling the multimodal chain
+        # (VideoProcessor -> torchvision). We never send images/audio here.
+        self.tokenizer = AutoTokenizer.from_pretrained(name)
         self.model = AutoModelForCausalLM.from_pretrained(
             name, dtype=torch.float16, device_map="auto"
         )
         self.model.eval()
-        self.eos_token_id = self.processor.tokenizer.eos_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
         self._outlines_model = None  # lazy: only loaded if --constrained is used
 
     def _build_prompt(self, message: str, tables: dict) -> str:
@@ -68,7 +70,7 @@ class GemmaModel:
             messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q)})
             messages.append({"role": "assistant", "content": fs_a})
         messages.append({"role": "user", "content": format_user_turn(tables, message)})
-        return self.processor.apply_chat_template(
+        return self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
@@ -78,15 +80,12 @@ class GemmaModel:
     def _ensure_outlines(self) -> None:
         if self._outlines_model is None:
             import outlines
-            self._outlines_model = outlines.from_transformers(
-                self.model, self.processor.tokenizer
-            )
+            self._outlines_model = outlines.from_transformers(self.model, self.tokenizer)
 
     @torch.inference_mode()
     def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
         text = self._build_prompt(message, tables)
-        inputs = self.processor(text=text, return_tensors="pt").to(self.model.device)
-        input_len = inputs["input_ids"].shape[-1]
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
@@ -95,8 +94,8 @@ class GemmaModel:
             eos_token_id=self.eos_token_id,
             use_cache=True,
         )
-        response = self.processor.decode(
-            outputs[0][input_len:], skip_special_tokens=True
+        response = self.tokenizer.decode(
+            outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
         )
         return strip_code_fence(response)
 
