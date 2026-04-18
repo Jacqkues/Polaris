@@ -40,7 +40,7 @@ class Condition(BaseModel):
 
 class FilterOp(BaseModel):
     type: Literal["filter"]
-    conditions: list[Condition] = Field(min_length=1)
+    conditions: list[Condition]
     combine: Literal["and", "or"] = "and"
 
 
@@ -52,8 +52,8 @@ class Aggregation(BaseModel):
 
 class GroupByOp(BaseModel):
     type: Literal["group_by"]
-    columns: list[str] = Field(min_length=1)
-    aggregations: list[Aggregation] = Field(min_length=1)
+    columns: list[str]
+    aggregations: list[Aggregation]
 
 
 class SortColumn(BaseModel):
@@ -63,20 +63,20 @@ class SortColumn(BaseModel):
 
 class SortOp(BaseModel):
     type: Literal["sort"]
-    columns: list[SortColumn] = Field(min_length=1)
+    columns: list[SortColumn]
 
 
 class SelectOp(BaseModel):
     type: Literal["select"]
-    columns: list[str] = Field(min_length=1)
+    columns: list[str]
 
 
 class JoinOp(BaseModel):
     type: Literal["join"]
     table: str
-    on: str | None = None          # shared key name
-    left_on: str | None = None
-    right_on: str | None = None
+    on: str = ""          # shared key name; empty string means use left_on/right_on
+    left_on: str = ""
+    right_on: str = ""
     how: Literal["inner", "left", "outer"] = "inner"
 
 
@@ -85,29 +85,28 @@ class WithColumnExpr(BaseModel):
     expr: Literal["rank"]
     method: Literal["dense", "ordinal", "average", "min", "max"] = "dense"
     descending: bool = True
-    over: str | None = None    # window partition column
+    over: str = ""    # empty string means no window partition
     alias: str
 
 
 class WithColumnsOp(BaseModel):
     type: Literal["with_columns"]
-    expressions: list[WithColumnExpr] = Field(min_length=1)
+    expressions: list[WithColumnExpr]
 
 
 class HeadOp(BaseModel):
     type: Literal["head"]
-    n: int = Field(ge=1)
+    n: int
 
 
-Operation = Annotated[
-    Union[FilterOp, GroupByOp, SortOp, SelectOp, JoinOp, WithColumnsOp, HeadOp],
-    Field(discriminator="type"),
-]
+# Plain Union — no discriminator field, so Pydantic emits a flat anyOf schema
+# that llguidance handles correctly (discriminator+oneOf breaks constrained gen).
+Operation = Union[FilterOp, GroupByOp, SortOp, SelectOp, JoinOp, WithColumnsOp, HeadOp]
 
 
 class QueryPlan(BaseModel):
     source_table: str
-    operations: list[Operation] = Field(min_length=1)
+    operations: list[Operation]
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +171,7 @@ def _render_with_columns(op: WithColumnsOp) -> str:
     parts = []
     for e in op.expressions:
         base = f'pl.col("{e.column}").rank(method="{e.method}", descending={str(e.descending)})'
-        if e.over:
+        if e.over:  # empty string is falsy → no .over()
             base += f'.over("{e.over}")'
         base += f'.alias("{e.alias}")'
         parts.append(base)
@@ -213,27 +212,44 @@ def json_to_polars(plan: QueryPlan | dict) -> str:
 # Gemma-based JSON generator
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are a data query planner. Given a dataset schema and a question, output a JSON query plan — nothing else.
+_SYSTEM_PROMPT = """You are a data query planner. Output only a JSON object — no prose, no markdown fences.
 
-The JSON must match this structure exactly:
-{
-  "source_table": "<table name>",
-  "operations": [ ... ]
-}
+CRITICAL: "source_table" must be the bare table name exactly as it appears in "Datasets:" (e.g. "orders", "customer"). Never add dots, parentheses, or SQL syntax.
 
 Available operation types:
-- filter: { "type": "filter", "conditions": [{"column": "...", "op": "==|!=|<|<=|>|>=", "value": <str|int|float|bool>}], "combine": "and"|"or" }
-- group_by: { "type": "group_by", "columns": [...], "aggregations": [{"agg": "sum|mean|min|max|len|n_unique|first|last", "column": "<col or *>", "alias": "..."}] }
-- sort: { "type": "sort", "columns": [{"name": "...", "descending": true|false}] }
-- select: { "type": "select", "columns": [...] }
-- join: { "type": "join", "table": "...", "on": "...", "how": "inner|left|outer" }
-- with_columns: { "type": "with_columns", "expressions": [{"column": "...", "expr": "rank", "method": "dense", "descending": true, "over": "<col>", "alias": "..."}] }
-- head: { "type": "head", "n": <int> }
+- filter: {"type":"filter","conditions":[{"column":"...","op":"==|!=|<|<=|>|>=","value":<str|int|float>}],"combine":"and"}
+- group_by: {"type":"group_by","columns":[...],"aggregations":[{"agg":"sum|mean|min|max|len","column":"...","alias":"..."}]}
+- sort: {"type":"sort","columns":[{"name":"...","descending":true}]}
+- select: {"type":"select","columns":[...]}
+- join: {"type":"join","table":"...","on":"...","how":"inner"}
+- head: {"type":"head","n":<int>}
 
 Rules:
+- source_table = the first table you query (bare name, no prefix).
 - Use only column names that exist in the schema.
-- Output only the JSON object, no markdown fences, no explanation.
-- Operations execute in the order listed."""
+- Output only the JSON object."""
+
+
+_FEWSHOT: list[tuple[dict, str, str]] = [
+    (
+        {"orders": {"columns": {"o_orderkey": "Int64", "o_totalprice": "Float64", "o_orderstatus": "Utf8"}, "n_rows": 1500000}},
+        "Return the 10 orders with the highest total price.",
+        '{"source_table":"orders","operations":[{"type":"sort","columns":[{"name":"o_totalprice","descending":true}]},{"type":"head","n":10}]}',
+    ),
+    (
+        {"lineitem": {"columns": {"l_orderkey": "Int64", "l_extendedprice": "Float64", "l_shipdate": "Date"}, "n_rows": 6000000}},
+        "Count lineitems per order, sorted by count descending.",
+        '{"source_table":"lineitem","operations":[{"type":"group_by","columns":["l_orderkey"],"aggregations":[{"agg":"len","column":"l_orderkey","alias":"count"}]},{"type":"sort","columns":[{"name":"count","descending":true}]}]}',
+    ),
+    (
+        {
+            "customer": {"columns": {"c_custkey": "Int64", "c_name": "Utf8", "c_nationkey": "Int64"}, "n_rows": 150000},
+            "nation": {"columns": {"n_nationkey": "Int64", "n_name": "Utf8"}, "n_rows": 25},
+        },
+        "Return customer name and nation name for all customers.",
+        '{"source_table":"customer","operations":[{"type":"join","table":"nation","on":"","left_on":"c_nationkey","right_on":"n_nationkey","how":"inner"},{"type":"select","columns":["c_name","n_name"]}]}',
+    ),
+]
 
 
 def _format_schema(tables: dict) -> str:
@@ -270,19 +286,52 @@ class JsonQueryGenerator:
             self._outlines_model = outlines.from_transformers(self.model, self.tokenizer)
 
     def _build_prompt(self, tables: dict, question: str) -> list[dict]:
-        schema_block = _format_schema(tables)
-        return [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": f"{schema_block}\n\nQuestion: {question}"},
-        ]
+        messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        for fs_tables, fs_q, fs_a in _FEWSHOT:
+            messages.append({"role": "user", "content": f"{_format_schema(fs_tables)}\n\nQuestion: {fs_q}"})
+            messages.append({"role": "assistant", "content": fs_a})
+        messages.append({"role": "user", "content": f"{_format_schema(tables)}\n\nQuestion: {question}"})
+        return messages
+
+    def _greedy(self, prompt: str, max_new_tokens: int = 768) -> str:
+        import torch
+        with torch.inference_mode():
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            out = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                use_cache=True,
+            )
+            return self.tokenizer.decode(
+                out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+            )
+
+    @staticmethod
+    def _extract_json(text: str) -> str:
+        """Pull the first {...} block out of free-form text."""
+        start = text.find("{")
+        if start == -1:
+            return text
+        depth = 0
+        for i, ch in enumerate(text[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start: i + 1]
+        return text[start:]  # truncated — return what we have, let validator report it
 
     def generate(self, tables: dict, question: str) -> QueryPlan:
-        """Constrained JSON generation — output is guaranteed to match QueryPlan schema.
+        """JSON generation with constrained-then-greedy fallback.
 
-        Uses outlines.Generator with the Pydantic model as output_type, which
-        builds a JSON-schema logits processor so the decoder can only emit tokens
-        that form valid QueryPlan JSON.  The generator returns a raw JSON string;
-        we parse it into a QueryPlan with model_validate_json.
+        L1: outlines.Generator with QueryPlan as output_type — builds a JSON-schema
+            logits processor so tokens are constrained to valid QueryPlan JSON.
+        L2: if L1 produces invalid JSON (e.g. truncation from llguidance), fall back
+            to unconstrained greedy decoding and extract the first {...} block.
         """
         import outlines
 
@@ -294,10 +343,18 @@ class JsonQueryGenerator:
             add_generation_prompt=True,
             enable_thinking=False,
         )
-        # outlines v1 API: Generator(model, output_type) → callable that returns str
-        generator = outlines.Generator(self._outlines_model, QueryPlan)
-        result: str = generator(prompt, max_new_tokens=512)
-        return QueryPlan.model_validate_json(result)
+
+        # L1 — constrained
+        try:
+            generator = outlines.Generator(self._outlines_model, QueryPlan)
+            result: str = generator(prompt, max_new_tokens=768)
+            return QueryPlan.model_validate_json(result)
+        except Exception as e:
+            print(f"[json_gen] constrained failed ({type(e).__name__}: {e}), falling back to greedy")
+
+        # L2 — greedy + JSON extraction
+        raw = self._greedy(prompt, max_new_tokens=768)
+        return QueryPlan.model_validate_json(self._extract_json(raw))
 
     def generate_and_convert(self, tables: dict, question: str) -> tuple[QueryPlan, str]:
         """Generate a QueryPlan and convert it to Polars code. Returns (plan, code)."""
