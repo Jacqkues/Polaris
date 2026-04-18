@@ -185,4 +185,250 @@ SEEDS: list[dict] = [
             ')'
         ),
     },
+    {
+        "id": "tpch_seed_011_bool_or_filter",
+        "tags": ["filter", "bool_or", "groupby"],
+        "difficulty": 2,
+        "tables_used": ["orders"],
+        "question": "Count orders per status, restricted to status 'F' or 'O'.",
+        "reference_code": (
+            'result = (\n'
+            '    orders\n'
+            '    .filter((pl.col("o_orderstatus") == "F") | (pl.col("o_orderstatus") == "O"))\n'
+            '    .group_by("o_orderstatus")\n'
+            '    .agg(pl.len().alias("n"))\n'
+            '    .sort("o_orderstatus")\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_012_not_filter",
+        "tags": ["filter", "not"],
+        "difficulty": 2,
+        "tables_used": ["customer"],
+        "question": "Return the first 5 customers whose market segment is not BUILDING.",
+        "reference_code": (
+            'result = (\n'
+            '    customer\n'
+            '    .filter(~(pl.col("c_mktsegment") == "BUILDING"))\n'
+            '    .select(["c_custkey", "c_mktsegment"])\n'
+            '    .sort("c_custkey")\n'
+            '    .head(5)\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_013_n_unique",
+        "tags": ["agg", "n_unique"],
+        "difficulty": 1,
+        "tables_used": ["orders"],
+        "question": "How many distinct customers have placed at least one order?",
+        "reference_code": (
+            'result = orders.select(pl.col("o_custkey").n_unique().alias("distinct_customers"))'
+        ),
+    },
+    {
+        "id": "tpch_seed_014_cast",
+        "tags": ["cast", "with_columns"],
+        "difficulty": 2,
+        "tables_used": ["part"],
+        "question": "Return the first 5 parts with p_size cast to Float64.",
+        "reference_code": (
+            'result = (\n'
+            '    part\n'
+            '    .with_columns(pl.col("p_size").cast(pl.Float64).alias("p_size_f"))\n'
+            '    .select(["p_partkey", "p_size_f"])\n'
+            '    .sort("p_partkey")\n'
+            '    .head(5)\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_015_str_starts_with",
+        "tags": ["filter", "string"],
+        "difficulty": 2,
+        "tables_used": ["customer"],
+        "question": "First 10 customers whose phone number starts with '11'.",
+        "reference_code": (
+            'result = (\n'
+            '    customer\n'
+            '    .filter(pl.col("c_phone").str.starts_with("11"))\n'
+            '    .select(["c_custkey", "c_phone"])\n'
+            '    .sort("c_custkey")\n'
+            '    .head(10)\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_016_dt_year_groupby",
+        "tags": ["date", "dt_year", "groupby", "agg"],
+        "difficulty": 3,
+        "tables_used": ["orders"],
+        "question": "Number of orders per year.",
+        "reference_code": (
+            'result = (\n'
+            '    orders\n'
+            '    .with_columns(pl.col("o_orderdate").dt.year().alias("year"))\n'
+            '    .group_by("year")\n'
+            '    .agg(pl.len().alias("n_orders"))\n'
+            '    .sort("year")\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_017_multi_agg_list",
+        "tags": ["groupby", "agg_list"],
+        "difficulty": 3,
+        "tables_used": ["lineitem"],
+        "question": "Per return flag: sum of quantity, mean extended price, max discount.",
+        "reference_code": (
+            'result = (\n'
+            '    lineitem\n'
+            '    .group_by("l_returnflag")\n'
+            '    .agg([\n'
+            '        pl.col("l_quantity").sum().alias("sum_qty"),\n'
+            '        pl.col("l_extendedprice").mean().alias("avg_price"),\n'
+            '        pl.col("l_discount").max().alias("max_disc"),\n'
+            '    ])\n'
+            '    .sort("l_returnflag")\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_018_groupby_multi",
+        "tags": ["groupby_multi", "agg"],
+        "difficulty": 2,
+        "tables_used": ["orders"],
+        "question": "Count orders grouped by status and priority.",
+        "reference_code": (
+            'result = (\n'
+            '    orders\n'
+            '    .group_by(["o_orderstatus", "o_orderpriority"])\n'
+            '    .agg(pl.len().alias("n"))\n'
+            '    .sort(["o_orderstatus", "o_orderpriority"])\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_019_with_columns_multi",
+        "tags": ["with_columns_list", "string", "arith"],
+        "difficulty": 3,
+        "tables_used": ["customer"],
+        "question": "Return 5 customers with upper-cased name and doubled account balance.",
+        "reference_code": (
+            'result = (\n'
+            '    customer\n'
+            '    .with_columns([\n'
+            '        pl.col("c_name").str.to_uppercase().alias("c_name_upper"),\n'
+            '        (pl.col("c_acctbal") * 2).alias("double_bal"),\n'
+            '    ])\n'
+            '    .select(["c_custkey", "c_name_upper", "double_bal"])\n'
+            '    .sort("c_custkey")\n'
+            '    .head(5)\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_020_rename",
+        "tags": ["rename", "select"],
+        "difficulty": 1,
+        "tables_used": ["customer"],
+        "question": "Rename c_custkey to id and c_name to name; return first 5 rows sorted by id.",
+        "reference_code": (
+            'result = (\n'
+            '    customer\n'
+            '    .select(["c_custkey", "c_name"])\n'
+            '    .rename({"c_custkey": "id", "c_name": "name"})\n'
+            '    .sort("id")\n'
+            '    .head(5)\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_021_unique_noargs",
+        "tags": ["unique"],
+        "difficulty": 1,
+        "tables_used": ["orders"],
+        "question": "Return the distinct (status, priority) pairs sorted lexicographically.",
+        "reference_code": (
+            'result = (\n'
+            '    orders\n'
+            '    .select(["o_orderstatus", "o_orderpriority"])\n'
+            '    .unique()\n'
+            '    .sort(["o_orderstatus", "o_orderpriority"])\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_022_left_join",
+        "tags": ["join_left", "select"],
+        "difficulty": 2,
+        "tables_used": ["nation", "region"],
+        "question": "First 5 nations with their region name, left-joined on region key.",
+        "reference_code": (
+            'result = (\n'
+            '    nation\n'
+            '    .join(region, left_on="n_regionkey", right_on="r_regionkey", how="left")\n'
+            '    .select([pl.col("n_name"), pl.col("r_name").alias("region")])\n'
+            '    .sort("n_name")\n'
+            '    .head(5)\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_023_three_way_join_arith",
+        "tags": ["join", "filter", "arith", "sort", "limit"],
+        "difficulty": 4,
+        "tables_used": ["lineitem", "orders", "customer"],
+        "question": "Top 10 lineitems (by price * (1-disc) * (1+tax)) for AUTOMOBILE customers.",
+        "reference_code": (
+            'result = (\n'
+            '    lineitem\n'
+            '    .join(orders, left_on="l_orderkey", right_on="o_orderkey")\n'
+            '    .join(customer, left_on="o_custkey", right_on="c_custkey")\n'
+            '    .filter(pl.col("c_mktsegment") == "AUTOMOBILE")\n'
+            '    .with_columns(\n'
+            '        (pl.col("l_extendedprice") * (1 - pl.col("l_discount")) * (1 + pl.col("l_tax")))\n'
+            '        .alias("gross")\n'
+            '    )\n'
+            '    .select(["c_name", "l_orderkey", "gross"])\n'
+            '    .sort("gross", descending=True)\n'
+            '    .head(10)\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_024_bool_and_date",
+        "tags": ["filter", "bool_and", "date"],
+        "difficulty": 3,
+        "tables_used": ["lineitem"],
+        "question": "Count lineitems shipped in 1994 with quantity > 30 and discount < 0.05.",
+        "reference_code": (
+            'result = (\n'
+            '    lineitem\n'
+            '    .filter(\n'
+            '        (pl.col("l_shipdate").is_between(pl.date(1994, 1, 1), pl.date(1994, 12, 31)))\n'
+            '        & (pl.col("l_quantity") > 30)\n'
+            '        & (pl.col("l_discount") < 0.05)\n'
+            '    )\n'
+            '    .select(pl.len().alias("n"))\n'
+            ')'
+        ),
+    },
+    {
+        "id": "tpch_seed_025_dt_month_filter",
+        "tags": ["date", "dt_month", "filter", "groupby"],
+        "difficulty": 3,
+        "tables_used": ["orders"],
+        "question": "Count March orders across all years.",
+        "reference_code": (
+            'result = (\n'
+            '    orders\n'
+            '    .with_columns(pl.col("o_orderdate").dt.month().alias("month"))\n'
+            '    .filter(pl.col("month") == 3)\n'
+            '    .group_by("month")\n'
+            '    .agg(pl.len().alias("n_march"))\n'
+            ')'
+        ),
+    },
 ]

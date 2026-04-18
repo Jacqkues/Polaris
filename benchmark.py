@@ -10,6 +10,7 @@ Usage:
   python benchmark.py                                   # full benchmark
   python benchmark.py --limit 3                         # smoke test
   python benchmark.py --oracle                          # harness self-check (100% expected)
+  python benchmark.py --constrained                     # Outlines CFG-constrained decoding
   python benchmark.py --debug                           # verbose diff on every failure
   python benchmark.py --out runs/baseline.json
 """
@@ -27,6 +28,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dataset.compare import ComparisonResult, compare_dataframes
 from dataset.executor import execute_code, load_tpch
+from dataset.polars_grammar import build_grammar
 
 MODEL_NAME = "LiquidAI/LFM2-8B-A1B"
 
@@ -102,17 +104,26 @@ class PolarisModel:
             name, dtype=torch.float16, device_map="auto"
         )
         self.model.eval()
+        self._outlines_model = None  # lazy: only loaded if --constrained is used
 
-    @torch.inference_mode()
-    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
+    def _build_prompt(self, message: str, tables: dict) -> str:
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         for fs_tables, fs_q, fs_a in FEWSHOT:
             messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q)})
             messages.append({"role": "assistant", "content": fs_a})
         messages.append({"role": "user", "content": format_user_turn(tables, message)})
-        text = self.tokenizer.apply_chat_template(
+        return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+
+    def _ensure_outlines(self) -> None:
+        if self._outlines_model is None:
+            import outlines
+            self._outlines_model = outlines.from_transformers(self.model, self.tokenizer)
+
+    @torch.inference_mode()
+    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
+        text = self._build_prompt(message, tables)
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(
             **inputs,
@@ -124,6 +135,25 @@ class PolarisModel:
         )
         response = self.tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        )
+        return strip_code_fence(response)
+
+    @torch.inference_mode()
+    def generate_constrained(
+        self, message: str, tables: dict, max_new_tokens: int = 512
+    ) -> str:
+        """Grammar-constrained generation via Outlines CFG.
+
+        Builds a per-request Polars grammar with the request's table/column
+        names injected so the decoder can only emit structurally-valid
+        Polars method chains referring to real tables.
+        """
+        from outlines.types import CFG
+        self._ensure_outlines()
+        prompt = self._build_prompt(message, tables)
+        grammar = build_grammar(tables)
+        response = self._outlines_model(
+            prompt, CFG(grammar), max_new_tokens=max_new_tokens
         )
         return strip_code_fence(response)
 
@@ -292,6 +322,7 @@ def run(
     debug_dir: Path | None,
     limit: int | None,
     oracle: bool,
+    constrained: bool = False,
 ) -> list[dict]:
     records = [
         json.loads(line) for line in seeds_path.read_text().splitlines() if line.strip()
@@ -326,7 +357,10 @@ def run(
             gen_error = None
         else:
             try:
-                generated = model.generate(rec["question"], prompt_schemas)
+                if constrained:
+                    generated = model.generate_constrained(rec["question"], prompt_schemas)
+                else:
+                    generated = model.generate(rec["question"], prompt_schemas)
                 gen_error = None
             except Exception as e:
                 generated = ""
@@ -379,6 +413,9 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--oracle", action="store_true",
                    help="Use reference_code as generation (validates the harness)")
+    p.add_argument("--constrained", action="store_true",
+                   help="Use grammar-constrained generation (Outlines CFG) with a "
+                        "Polars grammar built per-example from the request's schema")
     p.add_argument("--debug", action="store_true",
                    help="Print full diff (code + previews) for each failure")
     p.add_argument("--debug-dir", type=Path, default=Path("runs/debug"),
@@ -391,8 +428,12 @@ def main() -> int:
 
     debug_dir = None if args.no_debug_dir else args.debug_dir
 
+    if args.oracle and args.constrained:
+        print("WARN: --constrained has no effect with --oracle; ignoring.")
+
     results = run(
-        args.seeds, args.data, args.expected, debug_dir, args.limit, args.oracle
+        args.seeds, args.data, args.expected, debug_dir, args.limit, args.oracle,
+        constrained=args.constrained,
     )
     report(results, debug=args.debug)
 
