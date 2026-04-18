@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from dataset.polars_grammar import validate as lark_validate  # noqa: E402
 from test_gram.test_gram import build_gbnf  # noqa: E402
 
-GEMMA_MODEL = "google/gemma-4-E2B-it"
+MODEL = "mistralai/Ministral-3B-Instruct-2410"
 
 SYSTEM = (
     "Return only valid Python Polars code (no markdown, no comments). "
@@ -114,12 +114,13 @@ CASES = [
 def run() -> int:
     try:
         from vllm import LLM, SamplingParams
+        from vllm.sampling_params import StructuredOutputsParams
     except ImportError:
         print("vllm is not installed. Run: pip install vllm")
         return 1
 
-    print(f"Loading {GEMMA_MODEL} with vLLM...")
-    llm = LLM(model=GEMMA_MODEL, dtype="float16")
+    print(f"Loading {MODEL} with vLLM...")
+    llm = LLM(model=MODEL, dtype="float16")
 
     passed = 0
     failed = 0
@@ -131,7 +132,7 @@ def run() -> int:
         sampling_params = SamplingParams(
             temperature=0.0,
             max_tokens=512,
-            guided_grammar=gbnf,
+            structured_outputs=StructuredOutputsParams(grammar=gbnf),
         )
 
         outputs = llm.chat(
