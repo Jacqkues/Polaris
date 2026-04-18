@@ -141,7 +141,7 @@ PROMPT = (
 
 
 DEFAULT_REPO = "LiquidAI/LFM2.5-1.2B-Instruct-GGUF"
-DEFAULT_FILE = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
+DEFAULT_FILE = "LFM2.5-1.2B-Instruct-Q8_0.gguf"
 
 
 def _load_llm():

@@ -5,7 +5,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+<<<<<<< Updated upstream
 MODEL_NAME = "google/gemma-4-E2B-it"
+=======
+MODEL_NAME = "uidAI/LFM2-8B-A1B"
+>>>>>>> Stashed changes
 
 app = FastAPI()
 
