@@ -85,11 +85,12 @@ join_kw: "left_on" "=" colref
        | "on" "=" colref_or_list
        | "how" "=" STRING
 
-// colref = any quoted name in a column-reference position. Prefers COLSTR
-// (schema-declared) via terminal priority, but falls back to STRING so that
-// alias names created mid-chain (e.g. .alias("revenue")) can be referenced
-// later in the same expression.
-colref: COLSTR | STRING
+// colref = any quoted name in a column-reference position. Either a schema
+// column (COLSTR, strict enum) or an identifier-shaped string (IDSTR) so
+// mid-chain aliases like .alias("revenue") then .sort("revenue") work.
+// Importantly IDSTR forbids spaces/backticks/commas inside the quotes,
+// which prevents the decoder from emitting pl.col("x`, ") type garbage.
+colref: COLSTR | IDSTR
 colref_or_list: colref | colref_list
 // Trailing commas are allowed throughout, matching Python's list literal rules.
 colref_list: "[" colref ("," colref)* ","? "]"
@@ -102,7 +103,11 @@ expr_list: "[" expr ("," expr)* ","? "]"
 ?or_expr: and_expr ("|" and_expr)*
 ?and_expr: not_expr ("&" not_expr)*
 ?not_expr: "~" not_expr | cmp_expr
-?cmp_expr: sum_expr (cmp_op sum_expr)?
+// STRING is only allowed as a comparison RHS (filter values like
+// `pl.col("x") == "BUILDING"`), never as a free-standing atom. That stops
+// the decoder from emitting `.select("<garbage>")` via a bare literal.
+?cmp_expr: sum_expr (cmp_op cmp_rhs)?
+?cmp_rhs: sum_expr | STRING
 !cmp_op: "==" | "!=" | "<=" | ">=" | "<" | ">"
 ?sum_expr: prod_expr (sum_op prod_expr)*
 !sum_op: "+" | "-"
@@ -113,14 +118,14 @@ expr_list: "[" expr ("," expr)* ","? "]"
 atom_with_methods: expr_atom (expr_method)* | literal_atom
 
 ?expr_atom: col_atom | pl_len | pl_date | paren_expr
-?literal_atom: FLOAT | INT | STRING | COLSTR | BOOL
+// STRING is intentionally excluded — it's only allowed as a comparison RHS
+// (see cmp_rhs). COLSTR covers bare schema columns in list contexts like
+// select(["c_name"]); IDSTR covers mid-chain alias references like
+// select(["rank_in_nation"]) after an earlier .alias("rank_in_nation").
+?literal_atom: FLOAT | INT | COLSTR | IDSTR | BOOL
 
 paren_expr: "(" expr ")"
-// pl.col accepts a schema column (strict) OR a simple identifier-shaped
-// string, so alias names created mid-chain (.alias("revenue") then
-// pl.col("revenue")) remain expressible — but garbage like pl.col("x`,")
-// is rejected, unlike a generic STRING fallback.
-col_atom: "pl.col" "(" (COLSTR | IDSTR) ")"
+col_atom: "pl.col" "(" colref ")"
 IDSTR: /"[A-Za-z_][A-Za-z0-9_]*"/
 pl_len: "pl.len" "(" ")"
 pl_date: "pl.date" "(" INT "," INT "," INT ")"
@@ -279,7 +284,8 @@ joinkw ::= "left_on" ws "=" ws colref
          | "on" ws "=" ws colreforlist
          | "how" ws "=" ws string
 
-colref ::= colstr | string
+colref ::= colstr | identstr
+identstr ::= "\"" [a-zA-Z_] [a-zA-Z0-9_]* "\""
 colreforlist ::= colref | colreflist
 colreflist ::= "[" ws colref (ws "," ws colref)* (ws ",")? ws "]"
 boollist ::= "[" ws bool (ws "," ws bool)* (ws ",")? ws "]"
@@ -290,7 +296,8 @@ expr ::= orexpr
 orexpr ::= andexpr (ws "|" ws andexpr)*
 andexpr ::= notexpr (ws "&" ws notexpr)*
 notexpr ::= "~" ws notexpr | cmpexpr
-cmpexpr ::= sumexpr (ws cmpop ws sumexpr)?
+cmpexpr ::= sumexpr (ws cmpop ws cmprhs)?
+cmprhs ::= sumexpr | string
 cmpop ::= "==" | "!=" | "<=" | ">=" | "<" | ">"
 sumexpr ::= prodexpr (ws sumop ws prodexpr)*
 sumop ::= "+" | "-"
@@ -301,11 +308,10 @@ unary ::= "-" ws atomwithmethods | atomwithmethods
 atomwithmethods ::= expratom (exprmethod)* | literalatom
 
 expratom ::= colatom | pllen | pldate | parenexpr
-literalatom ::= float | int | string | colstr | bool
+literalatom ::= float | int | colstr | identstr | bool
 
 parenexpr ::= "(" ws expr ws ")"
-colatom ::= "pl.col" ws "(" ws (colstr | identstr) ws ")"
-identstr ::= "\"" [a-zA-Z_] [a-zA-Z0-9_]* "\""
+colatom ::= "pl.col" ws "(" ws colref ws ")"
 pllen ::= "pl.len" ws "(" ws ")"
 pldate ::= "pl.date" ws "(" ws int ws "," ws int ws "," ws int ws ")"
 
