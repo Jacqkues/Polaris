@@ -16,6 +16,7 @@ Differences vs benchmark.py:
 Usage:
   python benchmark_gemma.py --oracle --limit 3   # validate harness
   python benchmark_gemma.py --limit 3            # smoke test with Gemma
+  python benchmark_gemma.py --constrained        # + grammar-constrained decoding
   python benchmark_gemma.py                      # full benchmark
   python benchmark_gemma.py --out runs/gemma_promptv2.json
 """
@@ -33,6 +34,7 @@ from transformers import AutoModelForCausalLM, AutoProcessor
 
 from dataset.compare import ComparisonResult, compare_dataframes
 from dataset.executor import execute_code, load_tpch
+from dataset.polars_grammar import build_grammar
 from gemma_prompt import FEWSHOT, SYSTEM_PROMPT, format_user_turn
 
 MODEL_NAME = "google/gemma-4-E2B-it"
@@ -58,20 +60,31 @@ class GemmaModel:
         )
         self.model.eval()
         self.eos_token_id = self.processor.tokenizer.eos_token_id
+        self._outlines_model = None  # lazy: only loaded if --constrained is used
 
-    @torch.inference_mode()
-    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
+    def _build_prompt(self, message: str, tables: dict) -> str:
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         for fs_tables, fs_q, fs_a in FEWSHOT:
             messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q)})
             messages.append({"role": "assistant", "content": fs_a})
         messages.append({"role": "user", "content": format_user_turn(tables, message)})
-        text = self.processor.apply_chat_template(
+        return self.processor.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
         )
+
+    def _ensure_outlines(self) -> None:
+        if self._outlines_model is None:
+            import outlines
+            self._outlines_model = outlines.from_transformers(
+                self.model, self.processor.tokenizer
+            )
+
+    @torch.inference_mode()
+    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
+        text = self._build_prompt(message, tables)
         inputs = self.processor(text=text, return_tensors="pt").to(self.model.device)
         input_len = inputs["input_ids"].shape[-1]
         outputs = self.model.generate(
@@ -84,6 +97,26 @@ class GemmaModel:
         )
         response = self.processor.decode(
             outputs[0][input_len:], skip_special_tokens=True
+        )
+        return strip_code_fence(response)
+
+    @torch.inference_mode()
+    def generate_constrained(
+        self, message: str, tables: dict, max_new_tokens: int = 512
+    ) -> str:
+        """Grammar-constrained generation via Outlines CFG.
+
+        Builds a per-request Polars grammar with the request's table/column
+        names injected so the decoder can only emit structurally-valid Polars
+        method chains over real tables/columns — physically prevents API
+        hallucinations like `with_column` or `pl.desc`.
+        """
+        from outlines.types import CFG
+        self._ensure_outlines()
+        prompt = self._build_prompt(message, tables)
+        grammar = build_grammar(tables)
+        response = self._outlines_model(
+            prompt, CFG(grammar), max_new_tokens=max_new_tokens
         )
         return strip_code_fence(response)
 
@@ -255,6 +288,7 @@ def run(
     debug_dir: Path | None,
     limit: int | None,
     oracle: bool,
+    constrained: bool = False,
 ) -> list[dict]:
     records = [
         json.loads(line) for line in seeds_path.read_text().splitlines() if line.strip()
@@ -292,7 +326,10 @@ def run(
             gen_error = None
         else:
             try:
-                generated = model.generate(rec["question"], prompt_schemas)
+                if constrained:
+                    generated = model.generate_constrained(rec["question"], prompt_schemas)
+                else:
+                    generated = model.generate(rec["question"], prompt_schemas)
                 gen_error = None
             except Exception as e:
                 generated = ""
@@ -345,6 +382,9 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--oracle", action="store_true",
                    help="Use reference_code as generation (validates the harness)")
+    p.add_argument("--constrained", action="store_true",
+                   help="Use grammar-constrained generation (Outlines CFG) with a "
+                        "Polars grammar built per-example from the request's schema")
     p.add_argument("--debug", action="store_true",
                    help="Print full diff (code + previews) for each failure")
     p.add_argument("--debug-dir", type=Path, default=Path("runs/debug_gemma"),
@@ -357,8 +397,12 @@ def main() -> int:
 
     debug_dir = None if args.no_debug_dir else args.debug_dir
 
+    if args.oracle and args.constrained:
+        print("WARN: --constrained has no effect with --oracle; ignoring.")
+
     results = run(
-        args.seeds, args.data, args.expected, debug_dir, args.limit, args.oracle
+        args.seeds, args.data, args.expected, debug_dir, args.limit, args.oracle,
+        constrained=args.constrained,
     )
     report(results, debug=args.debug)
 
