@@ -40,7 +40,7 @@ from dataset.executor import load_tpch
 from dataset.polars_grammar import build_grammar_gbnf
 
 DEFAULT_REPO = "unsloth/gemma-4-E2B-it-GGUF"
-DEFAULT_FILE = "gemma-4-E2B-it-Q4_K_S.gguf"
+DEFAULT_FILE = "gemma-4-E2B-it-BF16.gguf"
 
 
 def _flatten_gbnf(grammar: str) -> str:
