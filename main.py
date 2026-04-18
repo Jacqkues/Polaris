@@ -24,7 +24,7 @@ import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from gemma_cascade import CONSTRAINED_AVAILABLE, run_cascade
+from gemma_cascade import CONSTRAINED_AVAILABLE, run_cascade_with_exec_retry
 from gemma_model import DEFAULT_MODEL_NAME, GemmaModel
 
 MODEL_NAME = os.environ.get("POLARIS_MODEL_NAME", DEFAULT_MODEL_NAME)
@@ -32,6 +32,7 @@ DISABLE_CONSTRAINED = os.environ.get("POLARIS_DISABLE_CONSTRAINED", "").lower() 
     "1", "true", "yes",
 )
 LOG_FULL_CODE = os.environ.get("POLARIS_LOG_FULL_CODE", "").lower() in ("1", "true", "yes")
+MAX_EXEC_RETRIES = int(os.environ.get("POLARIS_MAX_EXEC_RETRIES", "2"))
 
 app = FastAPI()
 
@@ -110,11 +111,12 @@ def chat(payload: ChatRequest) -> ChatResponse:
     )
 
     try:
-        result = run_cascade(
+        result = run_cascade_with_exec_retry(
             gemma,
             payload.message,
             payload.tables,
             disable_constrained=DISABLE_CONSTRAINED,
+            max_retries=MAX_EXEC_RETRIES,
         )
     except Exception as e:
         elapsed = time.time() - t0

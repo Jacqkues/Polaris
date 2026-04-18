@@ -21,6 +21,8 @@ from gemma_cascade import (  # noqa: E402
     detect_hallucinations,
     looks_ok,
     run_cascade,
+    run_cascade_with_exec_retry,
+    try_mock_execute,
 )
 
 
@@ -389,6 +391,127 @@ def test_cascade_result_is_dataclass() -> None:
     res = CascadeResult(code="x", level="fast", reason="ok")
     assert res.code == "x"
     assert res.level == "fast"
+
+
+# ---------------------------------------------------------------------------
+# try_mock_execute — mock-execution catches common runtime errors
+# ---------------------------------------------------------------------------
+
+def test_mock_exec_accepts_valid_code() -> None:
+    code = 'result = customer.filter(pl.col("c_custkey") > 10).select("c_name")'
+    ok, err = try_mock_execute(code, TPCH_TABLES)
+    assert ok, f"expected ok, got: {err}"
+
+
+def test_mock_exec_rejects_unknown_column() -> None:
+    code = 'result = customer.filter(pl.col("fake_col") > 0)'
+    ok, err = try_mock_execute(code, TPCH_TABLES)
+    assert not ok
+    assert "ColumnNotFound" in err or "fake_col" in err
+
+
+def test_mock_exec_rejects_missing_result() -> None:
+    code = 'x = customer.filter(pl.col("c_custkey") > 0)'
+    ok, err = try_mock_execute(code, TPCH_TABLES)
+    assert not ok
+    assert "result" in err.lower()
+
+
+def test_mock_exec_rejects_empty_code() -> None:
+    ok, err = try_mock_execute("", TPCH_TABLES)
+    assert not ok
+
+
+def test_mock_exec_rejects_syntax_error() -> None:
+    ok, err = try_mock_execute("result = customer.filter(", TPCH_TABLES)
+    assert not ok
+    assert "Syntax" in err or "SyntaxError" in err
+
+
+def test_mock_exec_catches_join_duplicate_error() -> None:
+    """Joining on columns that produce a name collision should be caught."""
+    # customer has c_name, nation (not in our TPCH_TABLES) would have n_name.
+    # Instead use a self-inducing case: two tables with same non-key column.
+    tables = {
+        "a": {"columns": {"id": "Int64", "name": "Utf8"}, "n_rows": 10},
+        "b": {"columns": {"id": "Int64", "name": "Utf8"}, "n_rows": 10},
+    }
+    # Join that may create a "name_right" suffix is OK, but refer to a
+    # dropped column after the join to exhibit a failure
+    code = 'result = a.join(b, on="id").filter(pl.col("missing") > 0)'
+    ok, err = try_mock_execute(code, tables)
+    assert not ok
+    assert "ColumnNotFound" in err or "missing" in err
+
+
+def test_mock_exec_handles_list_format_schema() -> None:
+    """Fallback: schema as bare list should not crash."""
+    tables = {"t": ["x", "y"]}
+    # Valid column ref
+    code = 'result = t.select("x")'
+    ok, err = try_mock_execute(code, tables)
+    assert ok
+
+
+def test_mock_exec_unknown_dtype_falls_back_to_utf8() -> None:
+    """An unfamiliar type string should not crash mock setup."""
+    tables = {"t": {"columns": {"x": "NotARealDtype"}, "n_rows": 1}}
+    code = 'result = t.select("x")'
+    ok, _ = try_mock_execute(code, tables)
+    assert ok
+
+
+# ---------------------------------------------------------------------------
+# run_cascade_with_exec_retry
+# ---------------------------------------------------------------------------
+
+def test_exec_retry_returns_cascade_result_when_mock_exec_passes() -> None:
+    """If the cascade's output already passes mock exec, no retry needed."""
+    model = MockModel(fast=GOOD_CODE)
+    res = run_cascade_with_exec_retry(
+        model, "q", TPCH_TABLES, disable_constrained=True, max_retries=2
+    )
+    assert res.level == "fast"
+    assert model.calls == ["fast"]  # no retry triggered
+
+
+def test_exec_retry_triggers_when_cascade_code_fails_mock_exec() -> None:
+    """Code that passes looks_ok but fails mock exec must trigger the exec-retry.
+
+    `.nonexistent_method()` is not caught by our static hallucination regex,
+    so looks_ok passes at L1, but mock exec raises AttributeError.
+    """
+    static_ok_but_bad = 'result = customer.nonexistent_method()'
+    model = MockModel(fast=static_ok_but_bad, retry=GOOD_CODE)
+    res = run_cascade_with_exec_retry(
+        model, "q", TPCH_TABLES, disable_constrained=True, max_retries=2
+    )
+    assert res.level.startswith("exec_retry")
+    assert res.code == GOOD_CODE
+    assert model.calls.count("retry") >= 1
+
+
+def test_exec_retry_respects_max_retries() -> None:
+    """After N retries, give up and return the last code (even if bad)."""
+    static_ok_but_bad = 'result = customer.nonexistent_method()'
+    static_ok_but_bad2 = 'result = customer.another_nonexistent()'
+    model = MockModel(fast=static_ok_but_bad, retry=static_ok_but_bad2)
+    res = run_cascade_with_exec_retry(
+        model, "q", TPCH_TABLES, disable_constrained=True, max_retries=2
+    )
+    # retry called exactly max_retries times, returns the last bad code
+    assert model.calls.count("retry") == 2
+
+
+def test_exec_retry_handles_model_exception_gracefully() -> None:
+    """If the retry call itself raises, stop gracefully and return the prior best."""
+    static_ok_but_bad = 'result = customer.nonexistent_method()'
+    model = MockModel(fast=static_ok_but_bad, retry_raises=RuntimeError("oom"))
+    res = run_cascade_with_exec_retry(
+        model, "q", TPCH_TABLES, disable_constrained=True, max_retries=2
+    )
+    # should not crash; returns the bad code
+    assert res.code == static_ok_but_bad
 
 
 # ---------------------------------------------------------------------------

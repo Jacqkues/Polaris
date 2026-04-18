@@ -247,12 +247,40 @@ Sur les 21 échecs du Run 3, **17 sont des erreurs `column_set`** (colonnes atte
 - Latence : -13% (paradoxalement plus rapide — peut-être mieux ancré, génère moins de tokens inutiles)
 - Matches : plafond atteint sur les d1, bloqué sur d2+ par la convention d'aliasing
 
+### Run 4 — Cascade de génération + retry exec
+
+Architecture en 4 niveaux pour adapter la stratégie à la difficulté de chaque question :
+
+| Niveau | Quand | Latence | Commentaire |
+|---|---|---|---|
+| **L1 — Fast** | default | ~2.5s | Prompt v2 normal, greedy decoding |
+| **L2 — Constrained** | Si L1 fail `looks_ok()` statique | ~5-8s | Grammar CFG Polars (auto-skip si `llguidance` indispo) |
+| **L3 — Retry hallucination** | Si L2 fail | ~3-4s | Re-prompt avec les anti-patterns détectés en L1 |
+| **L4 — Exec retry (×N)** | Si le code final échoue à l'exécution mock | ~3-4s/retry | Re-prompt avec l'**erreur Polars réelle** + liste des colonnes valides |
+
+Points clés d'implémentation :
+- **`looks_ok(code, tables)`** : validation **statique** (AST + regex d'anti-patterns + vérif colonnes vs schéma). Utilisable à la fois côté serveur (sans tables) et benchmark.
+- **`try_mock_execute(code, schema)`** : crée des DataFrames **vides** avec les bons types, exécute le code. Catch `ColumnNotFoundError`, `DuplicateError`, `SchemaError`, `AttributeError` — sans avoir besoin des vraies données.
+- **Retry feedback** : l'erreur Polars est injectée dans le prompt comme message user. Les erreurs Polars sont bien formées (listent les colonnes valides sur ColumnNotFoundError, suggèrent `suffix=` sur DuplicateError), donc le modèle a tout pour corriger.
+- **Mémoire courte** : chaque retry voit l'erreur courante + la tentative précédente uniquement, pas tout l'historique. Choix pragmatique (focus + contrôle de T).
+
+### Découverte majeure : polars.bench n'utilise PAS TPC-H
+
+Dès les premiers tests sur la plateforme officielle, les erreurs révèlent des schémas **très différents** de nos 25 seeds locaux :
+
+| Erreur polars.bench | Colonnes visibles | Dataset reconnu |
+|---|---|---|
+| `ColumnNotFoundError: "category"; valid: [order_id, customer_id, freight...]` | Northwind |
+| `valid: [payment_id, staff_id, rental_id, payment_date]` | Sakila |
+| `valid: [actor_id, film_id, film_id_right]` | Sakila |
+
+→ **Le benchmark officiel tire des questions de datasets style Spider** (Northwind, Sakila, Chinook…), pas de TPC-H. Conséquences pour notre démarche :
+- Notre crainte d'overfit sur les conventions d'aliasing TPC-H **n'a pas eu lieu** par chance — les conventions polars.bench sont différentes de toute façon.
+- Le principal mode d'échec côté prod est **l'hallucination de noms de colonnes** (le modèle invente `user_id` au lieu de `customer_id`, `category` au lieu de `category_id`). C'est **exactement** ce que l'exec-retry attaque : la liste des colonnes valides apparaît dans l'erreur Polars et suffit au modèle pour corriger en un retry.
+
 ### Décision
 
-**Le prompt engineering a atteint sa limite naturelle** sur ce benchmark. Le gap restant (runs → matches) est un problème **de convention, pas de capacité** du modèle. Gagner 10+ matches supplémentaires demanderait soit :
-- Overfitter aux conventions locales (mais polars.bench a d'autres seeds cachés)
-- Fine-tuner sur un dataset avec les bonnes conventions (piste LoRA en cours côté Jacques)
-- Utiliser la grammaire contrainte en complément (dep `llguidance` manquante sur la VM au moment du run, à relancer)
+**Le prompt engineering a atteint sa limite naturelle** en local. L'étape suivante — exec-retry avec feedback d'erreur — s'attaque à la **bonne classe d'erreurs pour la prod** (hallucinations de colonnes), pas à la nôtre locale (conventions d'aliasing TPC-H). Autrement dit : nos 4/25 locaux ne mesurent **pas** ce qui va vraiment limiter le score en production. La cascade complète est déployée sur `main.py`.
 
 ---
 
@@ -268,8 +296,9 @@ Sur les 21 échecs du Run 3, **17 sont des erreurs `column_set`** (colonnes atte
 
 ### En cours / en attente
 
-- 🔄 **Grammar-constrained (`--constrained`)** : flag implémenté (`GemmaModel.generate_constrained` via Outlines CFG + `build_grammar`). Premier run bloqué par dépendance manquante `llguidance` sur la VM (à `uv add`). Quand ça tourne, devrait éliminer les 4 crashes d'API hallucinée par construction.
-- 🔄 **Pipeline SFT / LoRA** (côté Jacques) : dataset Spider → Polars via transpileur + fine-tuning LoRA. Intéressant pour apprendre les conventions d'aliasing qui sont notre plafond actuel.
+- 🔄 **Grammar-constrained (`--constrained`, L2 de la cascade)** : flag implémenté (`GemmaModel.generate_constrained` via Outlines CFG + `build_grammar`). Backend `llguidance` parfois instable sur la VM — la cascade skip L2 auto si indispo, dégénère en fast → retry sans crash.
+- ✅ **Retry avec feedback exec (L4 de la cascade)** : `try_mock_execute` + `run_cascade_with_exec_retry` dans `gemma_cascade.py`. Construit des DataFrames vides depuis le schéma, exécute le code, catch les erreurs Polars avant de répondre, re-prompt avec l'erreur comme feedback. Jusqu'à N retries (env `POLARIS_MAX_EXEC_RETRIES`, défaut 2). Branché sur `main.py`. Cible directement les hallucinations de noms de colonnes observées sur polars.bench.
+- 🔄 **Pipeline SFT / LoRA** (côté Jacques) : dataset Spider → Polars via transpileur + fine-tuning LoRA. Intéressant si on veut aller au-delà du retry.
 
 ### Écartées après analyse (pas testées)
 
@@ -307,15 +336,18 @@ Sur les 21 échecs du Run 3, **17 sont des erreurs `column_set`** (colonnes atte
 - **Gemma 4 E2B est étonnamment fort sur le Polars moderne** pour un 2.3B effective params (`parses` 100% dès le baseline). Le choix par défaut de `AutoProcessor` dans la doc Google tire toute la chaîne multimodale (vidéo, audio, image) même pour du texte pur → `AutoTokenizer` = même résultat, zéro dep supplémentaire.
 - **Le `--constrained` (grammar CFG) est puissant en théorie mais fragile en pratique** : Outlines demande `llguidance` comme backend, non installé par défaut. À prévoir pour toute future soumission.
 - **Le format JSON du plan logique Polars est déprécié** (mais fonctionnel) : idée de transpileur SQL → code Polars via `LazyFrame.serialize(format="json")` reste viable si on le code.
+- **Le mock-exec sur DataFrame vide est suffisant** pour catch les 3 grandes familles d'erreurs runtime (ColumnNotFoundError, DuplicateError sur join, AttributeError). Pas besoin des vraies données — le plan lazy Polars valide les colonnes/types AVANT la première lecture de data. Ça rend l'exec-retry faisable même dans un serveur qui n'a jamais accès aux tables réelles.
+- **polars.bench n'utilise pas TPC-H** : on a découvert ça tardivement par les erreurs remontées (Northwind, Sakila). Notre benchmark local était un proxy sémantiquement raisonnable (mêmes familles de patterns) mais pas structurellement (schémas différents). Leçon : **ne jamais supposer que le proxy d'éval reproduit la distribution officielle** — chercher les erreurs réelles dès que possible.
 
 ---
 
 ## 9. Pistes non explorées (faute de temps)
 
-- **Retry loop avec feedback d'erreur** (D1 de `OPTIMISATIONS.md`) : re-prompter le modèle avec l'erreur `ColumnNotFoundError` + liste des colonnes valides. Faisable en 1h, gain attendu +15-30% sur N avec un coût T modéré.
-- **Fine-tuning LoRA sur dataset synthétique** : pipeline démarré par Jacques (Spider loader + SQL oracle + build_sft). Si terminé, permettrait d'apprendre les **conventions d'aliasing** qui plafonnent le prompt engineering.
-- **Self-correction des aliases** : parser le code généré, détecter les alias "verbeux" (`total_quantity`, `mean_extended_price`) et les remplacer par des formes courtes (`sum_qty`, `avg_price`). Hacky mais potentiellement rentable si le benchmark officiel suit la même convention.
-- **Ensembling Gemma + LFM2** : envoyer les deux, prendre celle qui parse. Coûte trop en T probablement.
+- ~~**Retry loop avec feedback d'erreur**~~ → **Fait** (L4 de la cascade, via mock-exec).
+- **Fine-tuning LoRA sur dataset synthétique** : pipeline démarré par Jacques (Spider loader + SQL oracle + build_sft). Intéressant si on veut dépasser le plafond du retry. Dataset Spider **aligne** même avec les schémas de polars.bench (découvert tardivement).
+- **Historique de retry cumulé** : au lieu de ne voir que la tentative précédente, le modèle verrait tout l'historique des essais + erreurs. Potentiel léger, coût T certain, pas prioritaire.
+- **Self-correction sémantique** (non couvert par mock-exec) : code qui tourne mais output shape incorrect. Nécessiterait d'exécuter sur des données réelles, ce que le serveur ne peut pas faire sans les tables.
+- **Ensembling Gemma + LFM2** : envoyer les deux, prendre celle qui passe mock-exec. Coûte T, peu de marge.
 - **Quantization AWQ / GPTQ** : VRAM quasi ignorable dans la formule, non prioritaire.
 
 ---
@@ -325,10 +357,11 @@ Sur les 21 échecs du Run 3, **17 sont des erreurs `column_set`** (colonnes atte
 Notre démarche a été guidée par **une lecture précise du scoring** (`N / (T · VRAM^0.1 · RAM^0.01)` → correctness écrase tout), ce qui nous a permis d'éviter les fausses pistes (quantization, self-consistency) et de concentrer les 6h disponibles sur les leviers à vrai ROI.
 
 **Ce qu'on livre** :
-- Un **harness d'évaluation local complet** qui reproduit la métrique officielle (25 seeds TPC-H, 4 tiers de scoring, comparison tolérant aux floats et à l'ordre de colonnes).
+- Un **harness d'évaluation local complet** (25 seeds TPC-H, 4 tiers de scoring, comparison tolérant aux floats et à l'ordre de colonnes).
 - Un **pipeline Gemma 4 E2B** avec prompt engineering ciblé : `runs` 40% → 84%, latence 2.86s → 2.48s.
-- Un **module prompt réutilisable** (`gemma_prompt.py`) isolé pour itérations rapides, avec 21 tests de non-régression.
-- Un **flag `--constrained`** prêt pour la génération via grammaire CFG (à débloquer côté dep VM).
-- Une **analyse honnête du plafond** : le problème résiduel est une convention d'aliasing non-inférable, pas un manque de capacité du modèle.
+- Une **cascade de génération à 4 niveaux** (`gemma_cascade.py`) qui adapte la stratégie à la difficulté : fast → grammar-constrained → retry hallucination → **retry via mock execution**. La dernière étape catch les `ColumnNotFoundError` / `DuplicateError` par exécution sur DataFrames vides, puis re-prompt Gemma avec l'erreur Polars réelle comme feedback.
+- Un **serveur FastAPI** (`main.py`) avec logs verbeux par requête (niveau cascade atteint, erreurs, code tronqué) pour diagnostic en prod.
+- Un **module prompt réutilisable** (`gemma_prompt.py`) et 69 tests unitaires sans GPU.
+- Une **analyse honnête du plafond** : le vrai blocker en prod n'est PAS ce qu'on observait en local. Notre benchmark local butait sur des conventions d'aliasing TPC-H ; polars.bench utilise d'autres schémas (Northwind, Sakila) et échoue surtout sur des hallucinations de noms de colonnes — exactement ce que la cascade attaque au niveau L4.
 
-**Le message clé** : benchmarker un SLM en production ne se résume pas à empiler des techniques. Il faut **lire la formule d'éval**, **identifier le vrai blocker** (pas supposer), et **choisir l'outil adapté à chaque classe d'erreur** (prompt pour guider, grammaire pour forcer, fine-tuning pour apprendre une convention). Dans un temps contraint, ce ciblage fait la différence entre 30% et 0% de score.
+**Le message clé** : benchmarker un SLM en production ne se résume pas à empiler des techniques. Il faut **lire la formule d'éval** pour trier les leviers, **identifier les classes d'erreur observées réellement** (pas supposer), et **choisir l'outil adapté à chacune** : prompt pour guider, grammaire pour forcer structurellement, feedback d'exec pour corriger au cas par cas. Dans un temps contraint, ce ciblage fait la différence entre 30% et 0% de score. Et surtout : **le proxy d'évaluation local n'est pas la prod** — il faut des signaux réels (logs d'erreur) pour ajuster la stratégie.

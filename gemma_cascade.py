@@ -238,3 +238,134 @@ def _safe_default(tables: dict) -> str:
 def _log_skip(msg: str) -> None:
     """Thin wrapper around print so tests can monkeypatch if needed."""
     print(f"[cascade] {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Mock execution — run the generated code against empty DataFrames
+# ---------------------------------------------------------------------------
+
+_PL_DTYPE_MAP = {
+    "Int8", "Int16", "Int32", "Int64",
+    "UInt8", "UInt16", "UInt32", "UInt64",
+    "Float32", "Float64",
+    "Boolean", "Bool",
+    "Utf8", "String", "Categorical",
+    "Date", "Datetime", "Time", "Duration",
+    "List", "Object", "Null",
+}
+
+
+def _resolve_pl_dtype(name: str):
+    """Map a Polars type string (as found in seeds) to a polars.DataType.
+    Falls back to Utf8 for unknown types so mock exec still works."""
+    import polars as pl
+    # Handle parameterized types like "Datetime[μs]", "List[Int64]"
+    base = name.split("[", 1)[0].split("(", 1)[0].strip()
+    # Common aliases
+    aliases = {"Bool": "Boolean", "String": "Utf8"}
+    base = aliases.get(base, base)
+    return getattr(pl, base, pl.Utf8)
+
+
+def _build_mock_tables(tables_schema: dict) -> dict:
+    """Create empty Polars DataFrames matching the provided schema. Used for
+    mock-exec validation — enough for ColumnNotFoundError, DuplicateError on
+    joins, SchemaError on cast, etc. Insufficient for data-dependent errors."""
+    import polars as pl
+    mock = {}
+    for name, meta in tables_schema.items():
+        cols = meta.get("columns", meta) if isinstance(meta, dict) else meta
+        if isinstance(cols, dict):
+            pl_schema = {col: _resolve_pl_dtype(str(dtype)) for col, dtype in cols.items()}
+        elif isinstance(cols, (list, tuple, set)):
+            pl_schema = {col: pl.Utf8 for col in cols}
+        else:
+            continue
+        mock[name] = pl.DataFrame(schema=pl_schema)
+    return mock
+
+
+def try_mock_execute(code: str, tables_schema: dict) -> tuple[bool, str]:
+    """Execute the generated code against empty DataFrames matching the schema.
+
+    Returns (success, error_message). On success, error_message is "".
+    Catches ColumnNotFoundError, DuplicateError, SchemaError, AttributeError,
+    SyntaxError, and anything else that fails at plan-build time. Does NOT
+    catch data-dependent issues (wrong aggregation, output shape mismatch…).
+    """
+    if not code or not code.strip():
+        return False, "empty code"
+    try:
+        import polars as pl
+        mock_tables = _build_mock_tables(tables_schema)
+    except Exception as e:
+        # If we can't even build the mock schema, skip mock exec (don't block)
+        return True, f"mock_setup_failed: {type(e).__name__}: {e}"
+    env: dict = {"pl": pl, **mock_tables}
+    try:
+        exec(code, env)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:400]}"
+    if "result" not in env:
+        return False, "code did not assign 'result'"
+    # Force plan evaluation if it's a LazyFrame
+    res = env["result"]
+    try:
+        if hasattr(res, "collect"):
+            res.collect()
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:400]}"
+    return True, ""
+
+
+def run_cascade_with_exec_retry(
+    model,
+    question: str,
+    tables: dict,
+    *,
+    disable_constrained: bool = False,
+    max_retries: int = 2,
+) -> CascadeResult:
+    """Cascade + post-validation via mock execution against empty DataFrames.
+
+    After the base cascade returns a code, we run it against empty DFs matching
+    the schema. If it raises (ColumnNotFoundError, DuplicateError on join,
+    SchemaError on cast…), we re-prompt the model with the actual error
+    message — up to `max_retries` times. Stops as soon as mock exec passes.
+
+    The error message from Polars is usually very informative (it lists the
+    valid columns on ColumnNotFoundError, suggests using a `suffix` kwarg on
+    join duplicates…), so the retry has strong leverage.
+    """
+    result = run_cascade(model, question, tables, disable_constrained=disable_constrained)
+
+    for attempt in range(1, max_retries + 1):
+        ok, err = try_mock_execute(result.code, tables)
+        if ok:
+            return result
+        _log_skip(f"mock_exec failed (attempt {attempt}): {err}")
+        # Re-prompt with the exec error
+        try:
+            new_code = model.generate_with_feedback(
+                question, tables, result.code, err
+            )
+        except Exception as e:
+            _log_skip(f"exec-retry gen raised {type(e).__name__}: {e}")
+            break
+        # Keep a level label that makes the source of this code obvious
+        new_level = f"exec_retry{attempt}"
+        # Update result; mark reason with the last fixed error
+        result = CascadeResult(
+            code=new_code,
+            level=new_level,
+            reason=f"fixed_from_mock_exec: {err[:100]}",
+            l1_code=result.l1_code,
+            l1_reason=result.l1_reason,
+        )
+
+    # Final mock-exec check — if it's still failing we return it anyway
+    # (best effort, logs inform it's dubious)
+    ok, err = try_mock_execute(result.code, tables)
+    if not ok:
+        _log_skip(f"mock_exec still failing after {max_retries} retries: {err}")
+    return result
