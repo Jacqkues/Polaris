@@ -477,7 +477,7 @@ def _load_llm():
 
     return Llama.from_pretrained(
         repo_id=DEFAULT_REPO, filename=DEFAULT_FILE,
-        n_ctx=4096, n_gpu_layers=-1, verbose=False,
+        n_ctx=131072, n_gpu_layers=-1, verbose=False,
     )
 
 
