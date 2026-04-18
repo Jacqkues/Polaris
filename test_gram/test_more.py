@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -128,7 +129,6 @@ def run() -> int:
     failed = 0
 
     for name, schema, task in CASES:
-        import json
         prompt = (
             f"Schema: {json.dumps(schema)}\n"
             f"Task: {task}"
