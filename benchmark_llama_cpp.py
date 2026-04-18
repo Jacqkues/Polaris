@@ -43,6 +43,27 @@ DEFAULT_REPO = "LiquidAI/LFM2.5-1.2B-Instruct-GGUF"
 DEFAULT_FILE = "LFM2.5-1.2B-Instruct-Q8_0.gguf"
 
 
+def _flatten_gbnf(grammar: str) -> str:
+    """Join rule-continuation lines into a single physical line.
+
+    `build_grammar_gbnf` (shared with xgrammar) wraps long alternatives like
+        methcall ::= a | b | c
+                   | d | e
+    onto multiple lines. xgrammar accepts that; llama.cpp's GBNF parser does
+    not — it treats a newline as end-of-rule and then chokes on the leading
+    `|` of the next line ("expecting name at |..."). We merge any line whose
+    first non-whitespace char is `|` into the previous line.
+    """
+    out: list[str] = []
+    for line in grammar.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("|") and out:
+            out[-1] = out[-1].rstrip() + " " + stripped
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 class LlamaCppModel:
     def __init__(
         self,
@@ -90,7 +111,7 @@ class LlamaCppModel:
         cached = self._grammar_cache.get(key)
         if cached is not None:
             return cached
-        gbnf = build_grammar_gbnf(tables)
+        gbnf = _flatten_gbnf(build_grammar_gbnf(tables))
         grammar = LlamaGrammar.from_string(gbnf, verbose=False)
         self._grammar_cache[key] = grammar
         return grammar

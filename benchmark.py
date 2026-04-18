@@ -104,7 +104,10 @@ class PolarisModel:
             name, dtype=torch.float16, device_map="auto"
         )
         self.model.eval()
-        self._outlines_model = None  # lazy: only loaded if --constrained is used
+        # xgrammar bits, built once on first --constrained call.
+        self._xgr = None
+        self._xgr_tokinfo = None
+        self._xgr_compiler = None
 
     def _build_prompt(self, message: str, tables: dict) -> str:
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -116,10 +119,21 @@ class PolarisModel:
             messages, tokenize=False, add_generation_prompt=True
         )
 
-    def _ensure_outlines(self) -> None:
-        if self._outlines_model is None:
-            import outlines
-            self._outlines_model = outlines.from_transformers(self.model, self.tokenizer)
+    def _ensure_xgrammar(self) -> None:
+        """Build the xgrammar tokenizer-info + compiler once and reuse.
+
+        Uses `model.config.vocab_size` (which accounts for LM-head padding)
+        rather than `tokenizer.vocab_size`, which under-reports for LFM2.5 and
+        causes `token_bitmask.shape` mismatches in downstream masking.
+        """
+        if self._xgr is None:
+            import xgrammar as xgr
+            self._xgr = xgr
+            vocab_size = self.model.config.vocab_size
+            self._xgr_tokinfo = xgr.TokenizerInfo.from_huggingface(
+                self.tokenizer, vocab_size=vocab_size
+            )
+            self._xgr_compiler = xgr.GrammarCompiler(self._xgr_tokinfo)
 
     @torch.inference_mode()
     def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
@@ -140,30 +154,53 @@ class PolarisModel:
 
     @torch.inference_mode()
     def generate_constrained(
-        self,
-        message: str,
-        tables: dict,
-        max_new_tokens: int = 512,
-        backend: str = "xgrammar",
+        self, message: str, tables: dict, max_new_tokens: int = 512,
     ) -> str:
-        """Grammar-constrained generation via Outlines CFG.
+        """Grammar-constrained decoding driven directly by xgrammar.
 
-        Builds a per-request Polars grammar (GBNF form) with the request's
-        table/column names injected so the decoder can only emit structurally-
-        valid Polars method chains referring to real tables.
-
-        `backend="xgrammar"` because llguidance fails on tokenizers with
-        nested Sequence decoders (e.g. LFM2.5); xgrammar ingests GBNF directly
-        and doesn't require the tokenizer-decoder introspection that trips up
-        llguidance.
+        We bypass Outlines' wrapper because it mis-sizes the bitmask with
+        LFM2.5-style tokenizers (uses `tokenizer.vocab_size` where xgrammar
+        expects `config.vocab_size`). This custom loop owns the KV cache and
+        applies the per-step token bitmask from the GrammarMatcher before
+        argmax sampling.
         """
-        from outlines.types import CFG
-        self._ensure_outlines()
+        self._ensure_xgrammar()
+        xgr = self._xgr
         prompt = self._build_prompt(message, tables)
-        grammar = build_grammar_gbnf(tables)
-        response = self._outlines_model(
-            prompt, CFG(grammar), max_new_tokens=max_new_tokens, backend=backend,
-        )
+        grammar_str = build_grammar_gbnf(tables)
+
+        compiled = self._xgr_compiler.compile_grammar(grammar_str)
+        matcher = xgr.GrammarMatcher(compiled)
+        vocab_size = self._xgr_tokinfo.vocab_size
+        bitmask = xgr.allocate_token_bitmask(1, vocab_size)
+
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        out = self.model(input_ids=inputs["input_ids"], use_cache=True)
+        logits = out.logits[:, -1, :]
+        past = out.past_key_values
+
+        generated: list[int] = []
+        eos = self.tokenizer.eos_token_id
+        for _ in range(max_new_tokens):
+            if matcher.is_terminated():
+                break
+            matcher.fill_next_token_bitmask(bitmask)
+            xgr.apply_token_bitmask_inplace(logits, bitmask.to(logits.device))
+            next_id = int(torch.argmax(logits, dim=-1).item())
+            if eos is not None and next_id == eos:
+                break
+            if not matcher.accept_token(next_id):
+                break
+            generated.append(next_id)
+            step = self.model(
+                input_ids=torch.tensor([[next_id]], device=self.model.device),
+                past_key_values=past,
+                use_cache=True,
+            )
+            logits = step.logits[:, -1, :]
+            past = step.past_key_values
+
+        response = self.tokenizer.decode(generated, skip_special_tokens=True)
         return strip_code_fence(response)
 
 
