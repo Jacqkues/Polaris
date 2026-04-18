@@ -183,12 +183,18 @@ def test_format_user_turn_strict_appends_column_reminder() -> None:
         },
     }
     turn = format_user_turn(tables, "List top customers", strict=True)
-    assert "STRICT" in turn
+    # Strict block uses passive wording (describes what EXISTS, not what to USE)
+    # to avoid the "select all these columns" misreading we observed with
+    # prescriptive wording.
+    assert "Available columns" in turn
+    assert "ColumnNotFoundError" in turn  # the failure mode is named explicitly
     assert "customer_id" in turn and "first_name" in turn
     assert "payment_id" in turn and "amount" in turn
     # Per-table grouping preserved so the model can associate cols with tables
     assert "customer:" in turn
     assert "payment:" in turn
+    # And an explicit reminder that selecting all is wrong
+    assert "not all" in turn.lower()
 
 
 def test_format_strict_block_empty_tables_returns_empty() -> None:
@@ -216,13 +222,13 @@ def test_format_user_turn_strict_false_matches_no_strict() -> None:
 
 
 def test_strict_block_appears_after_question_not_before() -> None:
-    """Recency bias — the strict reminder must be AFTER the question
-    so it's the most recent tokens the model sees."""
+    """Recency bias — the available-columns reminder must be AFTER the
+    question so it's among the most recent tokens the model sees."""
     tables = {"t": {"columns": {"x": "Int64"}, "n_rows": 1}}
     turn = format_user_turn(tables, "THE_QUESTION", strict=True)
     idx_q = turn.index("THE_QUESTION")
-    idx_s = turn.index("STRICT")
-    assert idx_q < idx_s, "STRICT block must come after the question"
+    idx_s = turn.index("Available columns")
+    assert idx_q < idx_s, "reminder block must come after the question"
 
 
 # ---------------------------------------------------------------------------

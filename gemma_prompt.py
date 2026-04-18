@@ -142,7 +142,13 @@ def _format_strict_block(tables: dict) -> str:
     """Compact reminder of valid column names per table, appended right after
     the question so the model's most recent tokens contain the schema — helps
     small models like Gemma E2B that otherwise hallucinate generic names
-    (`user_id`, `order_id`) from their training data."""
+    (`user_id`, `order_id`) from their training data.
+
+    Note the framing: we describe what *exists* (passively) rather than
+    prescribing what to *use*. Earlier wording ("use ONLY these") was
+    misread as "select all these columns" and caused spurious extras in
+    the output. The passive framing avoids that trap.
+    """
     per_table_lines = []
     for name, meta in tables.items():
         if isinstance(meta, dict):
@@ -161,10 +167,10 @@ def _format_strict_block(tables: dict) -> str:
         return ""
     body = "\n".join(per_table_lines)
     return (
-        "STRICT reminder — use ONLY these exact column names:\n"
+        "Available columns (any reference to a name NOT in this list will "
+        "fail with ColumnNotFoundError):\n"
         f"{body}\n"
-        "Do NOT invent or paraphrase column names "
-        "(e.g. do not use `user_id` if only `customer_id` exists)."
+        "Select only the columns the question asks for — not all of them."
     )
 
 
