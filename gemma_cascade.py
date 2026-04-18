@@ -285,6 +285,60 @@ def _build_mock_tables(tables_schema: dict) -> dict:
     return mock
 
 
+_MISSING_COL_RE = re.compile(r'unable to find column\s+"([^"]+)"', re.IGNORECASE)
+_VALID_COLS_RE = re.compile(r'valid columns?:\s*\[([^\]]+)\]', re.IGNORECASE)
+
+
+def build_structured_feedback(error_msg: str) -> str:
+    """Turn a raw Polars error into an actionable feedback message for the LLM.
+
+    Recognizes common patterns and reformulates them with an explicit
+    corrective instruction. Falls back to a generic wording when no known
+    pattern matches. The goal is to maximize the signal the model sees —
+    a parsed "valid columns: [...]" is far easier to act on than a raw
+    traceback.
+    """
+    if not error_msg:
+        return "Previous code failed with an unknown error. Rewrite carefully."
+
+    missing = _MISSING_COL_RE.search(error_msg)
+    valid = _VALID_COLS_RE.search(error_msg)
+    if missing and valid:
+        return (
+            f'Your previous code referenced column "{missing.group(1)}" '
+            f"which does not exist. "
+            f"The ONLY valid column names are: [{valid.group(1)}]. "
+            f"Rewrite using EXCLUSIVELY these exact names — do not invent or paraphrase."
+        )
+    if "DuplicateError" in error_msg:
+        return (
+            "Your previous code caused a column-name collision on a join "
+            "(DuplicateError). Either pre-select/rename the conflicting column "
+            "before the join, or pass suffix=\"_other\" to .join(...) to "
+            f"disambiguate. Raw error: {error_msg[:200]}"
+        )
+    if "ColumnNotFoundError" in error_msg:
+        return (
+            "Your previous code referenced a column that does not exist in "
+            "the schema. Use only the columns listed in the Datasets block above. "
+            f"Raw error: {error_msg[:200]}"
+        )
+    if "SchemaError" in error_msg:
+        return (
+            "Your previous code raised a SchemaError — likely a type mismatch "
+            "(e.g. comparing a List column to a scalar, or casting to a "
+            "wrong type). Revisit the types in the Datasets block above. "
+            f"Raw error: {error_msg[:250]}"
+        )
+    if "AttributeError" in error_msg:
+        return (
+            "Your previous code called an attribute or method that doesn't "
+            "exist on the object. Review the Modern Polars API rules in the "
+            f"system prompt. Raw error: {error_msg[:250]}"
+        )
+    return f"Your previous code failed with: {error_msg[:400]}. Rewrite carefully."
+
+
 def try_mock_execute(code: str, tables_schema: dict) -> tuple[bool, str]:
     """Execute the generated code against empty DataFrames matching the schema.
 
@@ -344,10 +398,12 @@ def run_cascade_with_exec_retry(
         if ok:
             return result
         _log_skip(f"mock_exec failed (attempt {attempt}): {err}")
-        # Re-prompt with the exec error
+        # Re-prompt with a structured feedback derived from the Polars error
+        # (parses missing-column names + valid-columns list for max clarity).
+        feedback = build_structured_feedback(err)
         try:
             new_code = model.generate_with_feedback(
-                question, tables, result.code, err
+                question, tables, result.code, feedback
             )
         except Exception as e:
             _log_skip(f"exec-retry gen raised {type(e).__name__}: {e}")

@@ -23,7 +23,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from gemma_prompt import FEWSHOT, SYSTEM_PROMPT, format_schema, format_user_turn  # noqa: E402
+from gemma_prompt import (  # noqa: E402
+    FEWSHOT,
+    SYSTEM_PROMPT,
+    _format_strict_block,
+    format_schema,
+    format_user_turn,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +158,71 @@ def test_format_user_turn_preserves_special_chars_in_question() -> None:
     q = 'Filter where name == "O\'Brien" and count\nrows 😀'
     turn = format_user_turn(tables, q)
     assert q in turn
+
+
+# ---------------------------------------------------------------------------
+# Strict block (D) — stronger schema emphasis on the real user turn
+# ---------------------------------------------------------------------------
+
+def test_format_user_turn_default_has_no_strict_block() -> None:
+    """Few-shot turns should stay compact — no STRICT by default."""
+    tables = {"t": {"columns": {"x": "Int64"}, "n_rows": 10}}
+    turn = format_user_turn(tables, "Q?")
+    assert "STRICT" not in turn
+
+
+def test_format_user_turn_strict_appends_column_reminder() -> None:
+    tables = {
+        "customer": {
+            "columns": {"customer_id": "Int64", "first_name": "Utf8"},
+            "n_rows": 100,
+        },
+        "payment": {
+            "columns": {"payment_id": "Int64", "amount": "Float64"},
+            "n_rows": 50,
+        },
+    }
+    turn = format_user_turn(tables, "List top customers", strict=True)
+    assert "STRICT" in turn
+    assert "customer_id" in turn and "first_name" in turn
+    assert "payment_id" in turn and "amount" in turn
+    # Per-table grouping preserved so the model can associate cols with tables
+    assert "customer:" in turn
+    assert "payment:" in turn
+
+
+def test_format_strict_block_empty_tables_returns_empty() -> None:
+    assert _format_strict_block({}) == ""
+
+
+def test_format_strict_block_empty_columns_in_table_is_skipped() -> None:
+    """A table with an empty columns dict should be silently skipped, not crash."""
+    tables = {"empty": {"columns": {}, "n_rows": 0}}
+    assert _format_strict_block(tables) == ""
+
+
+def test_format_strict_block_handles_list_format() -> None:
+    """Legacy list-style schema must still produce a reminder."""
+    tables = {"t": ["x", "y", "z"]}
+    block = _format_strict_block(tables)
+    assert "t:" in block
+    assert "x" in block and "y" in block and "z" in block
+
+
+def test_format_user_turn_strict_false_matches_no_strict() -> None:
+    """strict=False explicitly should behave like the default."""
+    tables = {"t": {"columns": {"x": "Int64"}, "n_rows": 1}}
+    assert format_user_turn(tables, "Q", strict=False) == format_user_turn(tables, "Q")
+
+
+def test_strict_block_appears_after_question_not_before() -> None:
+    """Recency bias — the strict reminder must be AFTER the question
+    so it's the most recent tokens the model sees."""
+    tables = {"t": {"columns": {"x": "Int64"}, "n_rows": 1}}
+    turn = format_user_turn(tables, "THE_QUESTION", strict=True)
+    idx_q = turn.index("THE_QUESTION")
+    idx_s = turn.index("STRICT")
+    assert idx_q < idx_s, "STRICT block must come after the question"
 
 
 # ---------------------------------------------------------------------------

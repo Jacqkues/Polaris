@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from gemma_cascade import (  # noqa: E402
     CascadeResult,
     _collect_valid_columns,
+    build_structured_feedback,
     detect_hallucinations,
     looks_ok,
     run_cascade,
@@ -512,6 +513,102 @@ def test_exec_retry_handles_model_exception_gracefully() -> None:
     )
     # should not crash; returns the bad code
     assert res.code == static_ok_but_bad
+
+
+# ---------------------------------------------------------------------------
+# build_structured_feedback (E) — reformulate Polars errors for the LLM
+# ---------------------------------------------------------------------------
+
+def test_feedback_extracts_missing_col_and_valid_list() -> None:
+    """The sweet spot: ColumnNotFoundError with both the missing name and
+    the valid list — must produce a clean, actionable feedback."""
+    err = (
+        'ColumnNotFoundError: unable to find column "user_id"; '
+        'valid columns: ["customer_id", "first_name", "last_name"]'
+    )
+    fb = build_structured_feedback(err)
+    assert '"user_id"' in fb
+    assert "customer_id" in fb and "first_name" in fb
+    assert "EXCLUSIVELY" in fb or "exclusively" in fb.lower()
+
+
+def test_feedback_handles_column_not_found_without_valid_list() -> None:
+    """Sometimes Polars may not include the valid-columns list. Fallback gracefully."""
+    err = "ColumnNotFoundError: something about a column"
+    fb = build_structured_feedback(err)
+    assert "column" in fb.lower()
+    assert err[:50] in fb  # raw error is quoted
+
+
+def test_feedback_handles_duplicate_error_join() -> None:
+    err = "DuplicateError: column with name 'name_right' already exists"
+    fb = build_structured_feedback(err)
+    assert "DuplicateError" in fb or "collision" in fb.lower()
+    assert "suffix" in fb  # the fix hint
+
+
+def test_feedback_handles_schema_error() -> None:
+    err = "SchemaError: could not evaluate '<=' comparison between List and Int"
+    fb = build_structured_feedback(err)
+    assert "SchemaError" in fb or "type" in fb.lower()
+
+
+def test_feedback_handles_attribute_error() -> None:
+    err = "AttributeError: 'DataFrame' object has no attribute 'len'"
+    fb = build_structured_feedback(err)
+    assert "attribute" in fb.lower() or "API" in fb
+
+
+def test_feedback_empty_error_is_safe() -> None:
+    fb = build_structured_feedback("")
+    assert "unknown" in fb.lower() or "rewrite" in fb.lower()
+
+
+def test_feedback_unknown_error_falls_back_to_raw() -> None:
+    err = "TotallyMadeUpError: something wrong"
+    fb = build_structured_feedback(err)
+    assert "something wrong" in fb
+
+
+def test_feedback_truncates_very_long_raw_errors() -> None:
+    """Don't blow up the context window with a giant error."""
+    err = "SomeError: " + "X" * 10000
+    fb = build_structured_feedback(err)
+    assert len(fb) < 600  # capped
+
+
+# ---------------------------------------------------------------------------
+# exec-retry uses structured feedback end-to-end
+# ---------------------------------------------------------------------------
+
+class _CaptureModel(MockModel):
+    """Captures the feedback string passed to generate_with_feedback."""
+    def __init__(self, fast: str, retry: str) -> None:
+        super().__init__(fast=fast, retry=retry)
+        self.last_feedback: str | None = None
+        self.last_previous_code: str | None = None
+
+    def generate_with_feedback(self, message, tables, previous_code, feedback):
+        self.last_previous_code = previous_code
+        self.last_feedback = feedback
+        return super().generate_with_feedback(message, tables, previous_code, feedback)
+
+
+def test_exec_retry_passes_structured_feedback_not_raw() -> None:
+    """The EXEC retry (not L3) should receive the structured feedback built
+    from the Polars error. To exercise exec-retry specifically, the L1 code
+    must pass looks_ok but fail mock_execute — we use .nonexistent_method()
+    which slips past static checks but raises AttributeError at exec time."""
+    static_ok_but_bad = 'result = customer.nonexistent_method()'
+    model = _CaptureModel(fast=static_ok_but_bad, retry=GOOD_CODE)
+    run_cascade_with_exec_retry(
+        model, "q", TPCH_TABLES, disable_constrained=True, max_retries=2
+    )
+    assert model.last_feedback is not None
+    # For AttributeError, the structured feedback should reference the API rules
+    assert "attribute" in model.last_feedback.lower() or "API" in model.last_feedback
+    # And must contain the raw error info so the model can pinpoint the issue
+    assert "nonexistent_method" in model.last_feedback
 
 
 # ---------------------------------------------------------------------------

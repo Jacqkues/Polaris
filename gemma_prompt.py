@@ -138,5 +138,44 @@ def format_schema(tables: dict) -> str:
     return "\n".join(lines)
 
 
-def format_user_turn(tables: dict, question: str) -> str:
-    return f"{format_schema(tables)}\n\nQuestion: {question}"
+def _format_strict_block(tables: dict) -> str:
+    """Compact reminder of valid column names per table, appended right after
+    the question so the model's most recent tokens contain the schema — helps
+    small models like Gemma E2B that otherwise hallucinate generic names
+    (`user_id`, `order_id`) from their training data."""
+    per_table_lines = []
+    for name, meta in tables.items():
+        if isinstance(meta, dict):
+            cols = meta.get("columns", meta)
+        else:
+            cols = meta
+        if isinstance(cols, dict):
+            col_names = list(cols.keys())
+        elif isinstance(cols, (list, tuple, set)):
+            col_names = list(cols)
+        else:
+            continue
+        if col_names:
+            per_table_lines.append(f"  {name}: {', '.join(col_names)}")
+    if not per_table_lines:
+        return ""
+    body = "\n".join(per_table_lines)
+    return (
+        "STRICT reminder — use ONLY these exact column names:\n"
+        f"{body}\n"
+        "Do NOT invent or paraphrase column names "
+        "(e.g. do not use `user_id` if only `customer_id` exists)."
+    )
+
+
+def format_user_turn(tables: dict, question: str, *, strict: bool = False) -> str:
+    """Render the user turn. When `strict=True`, append a flat list of valid
+    column names right after the question (for the real request, to fight
+    recency bias). Keep `strict=False` for few-shot examples so they remain
+    concise and don't drown the pattern in boilerplate."""
+    base = f"{format_schema(tables)}\n\nQuestion: {question}"
+    if strict:
+        strict_block = _format_strict_block(tables)
+        if strict_block:
+            return f"{base}\n\n{strict_block}"
+    return base

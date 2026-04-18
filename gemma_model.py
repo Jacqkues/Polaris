@@ -54,12 +54,21 @@ class GemmaModel:
         self._outlines_model = None  # lazy: only loaded on first constrained call
 
     def _base_messages(self, message: str, tables: dict) -> list[dict]:
-        """Common prefix: system + few-shot examples + the current user turn."""
+        """Common prefix: system + few-shot examples + the current user turn.
+
+        The real user turn uses `strict=True` to append a compact reminder
+        of valid column names — helps fight recency bias on small models
+        that would otherwise hallucinate generic names (`user_id`, `order_id`)
+        from their training data. Few-shots stay at `strict=False` to keep
+        the pattern clean and the prompt short."""
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         for fs_tables, fs_q, fs_a in FEWSHOT:
             messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q)})
             messages.append({"role": "assistant", "content": fs_a})
-        messages.append({"role": "user", "content": format_user_turn(tables, message)})
+        messages.append({
+            "role": "user",
+            "content": format_user_turn(tables, message, strict=True),
+        })
         return messages
 
     def _render(self, messages: list[dict]) -> str:
