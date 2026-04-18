@@ -277,7 +277,13 @@ class JsonQueryGenerator:
         ]
 
     def generate(self, tables: dict, question: str) -> QueryPlan:
-        """Constrained JSON generation — output is guaranteed to match QueryPlan schema."""
+        """Constrained JSON generation — output is guaranteed to match QueryPlan schema.
+
+        Uses outlines.Generator with the Pydantic model as output_type, which
+        builds a JSON-schema logits processor so the decoder can only emit tokens
+        that form valid QueryPlan JSON.  The generator returns a raw JSON string;
+        we parse it into a QueryPlan with model_validate_json.
+        """
         import outlines
 
         self._ensure_outlines()
@@ -288,9 +294,10 @@ class JsonQueryGenerator:
             add_generation_prompt=True,
             enable_thinking=False,
         )
-        generator = outlines.generate.json(self._outlines_model, QueryPlan)
-        plan: QueryPlan = generator(prompt, max_tokens=512)
-        return plan
+        # outlines v1 API: Generator(model, output_type) → callable that returns str
+        generator = outlines.Generator(self._outlines_model, QueryPlan)
+        result: str = generator(prompt, max_tokens=512)
+        return QueryPlan.model_validate_json(result)
 
     def generate_and_convert(self, tables: dict, question: str) -> tuple[QueryPlan, str]:
         """Generate a QueryPlan and convert it to Polars code. Returns (plan, code)."""
