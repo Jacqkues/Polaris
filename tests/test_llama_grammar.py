@@ -8,8 +8,8 @@ Run:
 
 `Llama.from_pretrained` downloads the GGUF from the Hub on first run and
 caches it under ~/.cache/huggingface/hub. Override with env vars:
-    LFM2_REPO=LiquidAI/LFM2-8B-A1B-GGUF
-    LFM2_FILE=LFM2-8B-A1B-Q4_K_M.gguf
+    LFM2_REPO=LiquidAI/LFM2.5-1.2B-Instruct-GGUF
+    LFM2_FILE=LFM2.5-1.2B-Instruct-Q4_K_M.gguf
 Or point at a local file with LFM2_GGUF=/path/to/file.gguf.
 
 The test:
@@ -45,59 +45,46 @@ from dataset.polars_grammar import validate as lark_validate  # noqa: E402
 
 GBNF_BASE = r"""
 root ::= "result = (\n    " pipeline "\n)"
-
 pipeline ::= table-ref (nl method)+
 nl ::= "\n    "
-
 table-ref ::= tablename
 method ::= "." meth-call
-
-meth-call ::= filter-call | select-call | with-cols-call
-            | group-by-call | agg-call | sort-call
-            | head-call | limit-call | unique-call
-
-filter-call    ::= "filter(" expr ")"
-select-call    ::= "select(" expr-or-list ")"
+meth-call ::= filter-call | select-call | with-cols-call | group-by-call | agg-call | sort-call | head-call | limit-call | unique-call
+filter-call ::= "filter(" expr ")"
+select-call ::= "select(" expr-or-list ")"
 with-cols-call ::= "with_columns(" expr-or-list ")"
-agg-call       ::= "agg(" expr-or-list ")"
-group-by-call  ::= "group_by(" colref-or-list ")"
-sort-call      ::= "sort(" colref-or-list ("," ws "descending=" bool)? ")"
-head-call      ::= "head(" int ")"
-limit-call     ::= "limit(" int ")"
-unique-call    ::= "unique(" colref-or-list? ")"
-
+agg-call ::= "agg(" expr-or-list ")"
+group-by-call ::= "group_by(" colref-or-list ")"
+sort-call ::= "sort(" colref-or-list ("," ws "descending=" bool)? ")"
+head-call ::= "head(" int ")"
+limit-call ::= "limit(" int ")"
+unique-call ::= "unique(" colref-or-list? ")"
 colref-or-list ::= colstr | "[" colstr ("," ws colstr)* "]"
-expr-or-list   ::= expr  | "[" expr   ("," ws expr)*   "]"
-
-expr      ::= or-expr
-or-expr   ::= and-expr (ws "|" ws and-expr)*
-and-expr  ::= cmp-expr (ws "&" ws cmp-expr)*
-cmp-expr  ::= sum-expr (ws cmp-op ws sum-expr)?
-cmp-op    ::= "==" | "!=" | "<=" | ">=" | "<" | ">"
-sum-expr  ::= prod-expr (ws sum-op ws prod-expr)*
-sum-op    ::= "+" | "-"
+expr-or-list ::= expr | "[" expr ("," ws expr)* "]"
+expr ::= or-expr
+or-expr ::= and-expr (ws "|" ws and-expr)*
+and-expr ::= cmp-expr (ws "&" ws cmp-expr)*
+cmp-expr ::= sum-expr (ws cmp-op ws sum-expr)?
+cmp-op ::= "==" | "!=" | "<=" | ">=" | "<" | ">"
+sum-expr ::= prod-expr (ws sum-op ws prod-expr)*
+sum-op ::= "+" | "-"
 prod-expr ::= atom-m (ws prod-op ws atom-m)*
-prod-op   ::= "*" | "/"
-
+prod-op ::= "*" | "/"
 atom-m ::= atom ("." atom-meth)*
-atom   ::= col-atom | pl-len | string | float | int | colstr | bool | "(" expr ")"
-
+atom ::= col-atom | pl-len | string | float | int | colstr | bool | "(" expr ")"
 col-atom ::= "pl.col(" colstr ")"
-pl-len   ::= "pl.len()"
-
+pl-len ::= "pl.len()"
 atom-meth ::= alias-m | agg-m | strns-m | dtns-m
 alias-m ::= "alias(" string ")"
-agg-m   ::= ("sum" | "mean" | "min" | "max" | "count" | "n_unique" | "first" | "last") "()"
+agg-m ::= ("sum" | "mean" | "min" | "max" | "count" | "n_unique" | "first" | "last") "()"
 strns-m ::= "str." ("contains(" string ")" | "starts_with(" string ")" | "ends_with(" string ")" | "to_lowercase()" | "to_uppercase()")
-dtns-m  ::= "dt."  ("year()" | "month()" | "day()")
-
+dtns-m ::= "dt." ("year()" | "month()" | "day()")
 string ::= "\"" char* "\""
-char   ::= [^"\\] | "\\" ["\\/bfnrt]
-int    ::= [0-9]+
-float  ::= [0-9]+ "." [0-9]+
-bool   ::= "True" | "False"
-ws     ::= " "?
-
+char ::= [^"\\] | "\\" ["\\/bfnrt]
+int ::= [0-9]+
+float ::= [0-9]+ "." [0-9]+
+bool ::= "True" | "False"
+ws ::= " "?
 %TABLENAME%
 %COLSTR%
 """
@@ -153,8 +140,8 @@ PROMPT = (
 )
 
 
-DEFAULT_REPO = "LiquidAI/LFM2-8B-A1B-GGUF"
-DEFAULT_FILE = "LFM2-8B-A1B-Q4_K_M.gguf"
+DEFAULT_REPO = "LiquidAI/LFM2.5-1.2B-Instruct-GGUF"
+DEFAULT_FILE = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
 
 
 def _load_llm():
