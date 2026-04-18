@@ -32,7 +32,10 @@ DISABLE_CONSTRAINED = os.environ.get("POLARIS_DISABLE_CONSTRAINED", "").lower() 
     "1", "true", "yes",
 )
 LOG_FULL_CODE = os.environ.get("POLARIS_LOG_FULL_CODE", "").lower() in ("1", "true", "yes")
-MAX_EXEC_RETRIES = int(os.environ.get("POLARIS_MAX_EXEC_RETRIES", "2"))
+# Exec-retry is DISABLED by default after observing degenerate outputs on prod
+# (the model sometimes emits a lone ")" or a tuple-instead-of-str when fed the
+# retry feedback). Set POLARIS_MAX_EXEC_RETRIES=N to re-enable with N retries.
+MAX_EXEC_RETRIES = int(os.environ.get("POLARIS_MAX_EXEC_RETRIES", "0"))
 
 app = FastAPI()
 

@@ -295,7 +295,11 @@ def test_cascade_falls_through_to_retry_when_l2_returns_bad_code() -> None:
     assert model.calls == ["fast", "constrained", "retry"]
 
 
-def test_cascade_falls_back_when_all_levels_fail() -> None:
+def test_cascade_falls_back_to_safe_default_when_all_levels_fail_validation() -> None:
+    """When L1/L2/L3 all fail looks_ok, the fallback must return a SAFE
+    DEFAULT (not one of the broken candidates). Returning broken code like
+    `)` or a tuple-suffix ruins polars.bench scoring — better to return
+    `result = <first_table>` which at least parses, runs, and returns a DF."""
     bad1 = 'result = customer.with_column(pl.col("c_custkey"))'
     bad2 = 'result = customer.groupby("x")'
     bad3 = 'result = customer.len'
@@ -307,9 +311,26 @@ def test_cascade_falls_back_when_all_levels_fail() -> None:
         res = run_cascade(model, "q", TPCH_TABLES)
     finally:
         gemma_cascade.CONSTRAINED_AVAILABLE = prev
-    assert res.level == "fallback"
-    # Fallback preference: constrained > l1 > retry — we should get bad2
-    assert res.code == bad2
+    # None of the bad candidates should be returned. Safe default wins.
+    assert res.level == "fallback_default"
+    assert res.code.startswith("result = ")
+    assert res.code not in (bad1, bad2, bad3)
+
+
+def test_cascade_fallback_returns_candidate_that_passes_looks_ok() -> None:
+    """If a candidate secretly passes looks_ok (e.g. retry produces good code
+    but something else in the cascade logic rejected it), the fallback should
+    pick that candidate, not the safe default."""
+    # Craft: L1 fails looks_ok (hallucination), L2 disabled, L3 produces GOOD
+    # code. Normally run_cascade would return L3 at the "retry" level, not
+    # the fallback. But if it somehow reached fallback, it should pick L3.
+    bad1 = 'result = customer.with_column(pl.col("c_custkey"))'
+    model = MockModel(fast=bad1, retry=GOOD_CODE)
+    res = run_cascade(model, "q", TPCH_TABLES, disable_constrained=True)
+    # Should actually return at "retry" level (not fallback) — but either way
+    # the code must be GOOD_CODE.
+    assert res.code == GOOD_CODE
+    assert res.level in ("retry", "fallback_ok")
 
 
 def test_cascade_skips_l2_when_constrained_unavailable() -> None:
@@ -363,19 +384,20 @@ def test_cascade_handles_l2_exception_gracefully() -> None:
 
 
 def test_cascade_handles_l3_exception_gracefully() -> None:
-    """If even retry crashes, fallback must still return something non-empty."""
+    """If even retry crashes, fallback must still return something non-empty
+    AND statically valid (not a broken L1 code we just rejected)."""
     bad1 = 'result = customer.with_column(pl.col("c_custkey"))'
     model = MockModel(fast=bad1, retry_raises=RuntimeError("cuda OOM"))
     res = run_cascade(model, "q", TPCH_TABLES, disable_constrained=True)
-    assert res.level == "fallback"
-    assert res.code, "fallback must never be empty"
+    assert res.level == "fallback_default"
+    assert res.code.startswith("result = ")  # safe default, NOT bad1
 
 
 def test_cascade_fallback_uses_safe_default_when_all_empty() -> None:
     """Even if the model returns empty strings, fallback gives a runnable stub."""
     model = MockModel(fast="", retry="")
     res = run_cascade(model, "q", TPCH_TABLES, disable_constrained=True)
-    assert res.level == "fallback"
+    assert res.level == "fallback_default"
     assert res.code.startswith("result = ")
 
 

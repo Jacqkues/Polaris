@@ -220,10 +220,24 @@ def run_cascade(
         _log_skip(f"retry level raised {type(e).__name__}: {e}")
         code_v3 = ""
 
-    # -- Fallback — best-effort, never empty --------------------------------
-    best = code_v2 or l1_code or code_v3 or _safe_default(tables)
-    return CascadeResult(code=best, level="fallback", reason=l1_reason,
-                         l1_code=l1_code, l1_reason=l1_reason)
+    # -- Fallback — prefer ANY candidate that passes static validation,
+    # otherwise fall back to a safe default. We must NEVER return code that
+    # fails looks_ok (we already know it does) just because it's non-empty —
+    # e.g. the model may have produced ")" or a syntax-broken fragment. The
+    # safe default (`result = <first_table>`) at least parses, runs, and
+    # returns *something* so polars.bench can continue.
+    for candidate in (code_v2, code_v3, l1_code):
+        if candidate:
+            ok, _ = looks_ok(candidate, tables)
+            if ok:
+                return CascadeResult(
+                    code=candidate, level="fallback_ok",
+                    reason=l1_reason, l1_code=l1_code, l1_reason=l1_reason,
+                )
+    return CascadeResult(
+        code=_safe_default(tables), level="fallback_default",
+        reason=l1_reason, l1_code=l1_code, l1_reason=l1_reason,
+    )
 
 
 def _safe_default(tables: dict) -> str:
@@ -419,9 +433,24 @@ def run_cascade_with_exec_retry(
             l1_reason=result.l1_reason,
         )
 
-    # Final mock-exec check — if it's still failing we return it anyway
-    # (best effort, logs inform it's dubious)
+    # Final mock-exec check — if it's STILL failing after retries, we return
+    # a safe default rather than the last broken attempt. Returning broken
+    # code ("result = None" at worst) is strictly better than returning
+    # something that won't even parse (e.g. a lone ")" from a degenerate
+    # retry) and causes polars.bench to SyntaxError on our output.
     ok, err = try_mock_execute(result.code, tables)
     if not ok:
         _log_skip(f"mock_exec still failing after {max_retries} retries: {err}")
+        # Also try looks_ok on the current code — if it passes static but
+        # fails mock exec, it's still better than a safe default (partial
+        # credit possible). If it fails both, safe default is the floor.
+        static_ok, _ = looks_ok(result.code, tables)
+        if not static_ok:
+            return CascadeResult(
+                code=_safe_default(tables),
+                level="exec_retry_giveup",
+                reason=f"all_retries_failed: {err[:100]}",
+                l1_code=result.l1_code,
+                l1_reason=result.l1_reason,
+            )
     return result
