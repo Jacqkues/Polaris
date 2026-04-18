@@ -26,6 +26,58 @@ from dataset.hashing import hash_dataframe
 
 MODEL_NAME = "LiquidAI/LFM2-8B-A1B"
 
+SYSTEM_PROMPT = """Return only valid Python Polars code (no markdown fences, no prose).
+
+Rules:
+- Assign the final DataFrame to `result`.
+- Use Polars syntax, NOT pandas: `group_by` (not `groupby`), `pl.col("x")` for columns (never bare strings inside expressions or `.col_name` attribute access).
+- Dates: `.dt.year()`, `.dt.month()` for parts; `pl.date(Y, M, D)` for literals; `.is_between(a, b)` for ranges.
+- Aggregation: `pl.len()` for row count; use `.alias("name")` to rename outputs.
+- The provided DataFrames are already in scope by name — do not recreate them with pl.DataFrame()."""
+
+
+FEWSHOT: list[tuple[dict, str, str]] = [
+    (
+        {"sales": {"product": "Utf8", "revenue": "Float64", "region": "Utf8"}},
+        "Return all sales in Europe with revenue above 100, sorted by revenue descending.",
+        'result = (\n'
+        '    sales\n'
+        '    .filter((pl.col("region") == "Europe") & (pl.col("revenue") > 100))\n'
+        '    .sort("revenue", descending=True)\n'
+        ')',
+    ),
+    (
+        {"events": {"user_id": "Int64", "event_type": "Utf8", "ts": "Datetime"}},
+        "Count events per event_type for 2024, sorted by count descending.",
+        'result = (\n'
+        '    events\n'
+        '    .filter(pl.col("ts").dt.year() == 2024)\n'
+        '    .group_by("event_type")\n'
+        '    .agg(pl.len().alias("count"))\n'
+        '    .sort("count", descending=True)\n'
+        ')',
+    ),
+    (
+        {
+            "users": {"user_id": "Int64", "name": "Utf8"},
+            "orders": {"order_id": "Int64", "user_id": "Int64", "amount": "Float64"},
+        },
+        "For each user, return the total amount of their orders, top 5.",
+        'result = (\n'
+        '    users\n'
+        '    .join(orders, on="user_id")\n'
+        '    .group_by("name")\n'
+        '    .agg(pl.col("amount").sum().alias("total"))\n'
+        '    .sort("total", descending=True)\n'
+        '    .head(5)\n'
+        ')',
+    ),
+]
+
+
+def format_user_turn(tables: dict, question: str) -> str:
+    return f"Datasets:\n{json.dumps(tables, indent=2)}\n\nQuestion: {question}"
+
 
 def strip_code_fence(text: str) -> str:
     text = text.strip()
@@ -48,19 +100,12 @@ class PolarisModel:
         self.model.eval()
 
     @torch.inference_mode()
-    def generate(self, message: str, tables: dict, max_new_tokens: int = 256) -> str:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Return only valid Python Polars code. "
-                    "No markdown fences. "
-                    "Assign the final Polars DataFrame to result. "
-                    f"Available datasets: {json.dumps(tables, ensure_ascii=False)}"
-                ),
-            },
-            {"role": "user", "content": message},
-        ]
+    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for fs_tables, fs_q, fs_a in FEWSHOT:
+            messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q)})
+            messages.append({"role": "assistant", "content": fs_a})
+        messages.append({"role": "user", "content": format_user_turn(tables, message)})
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
