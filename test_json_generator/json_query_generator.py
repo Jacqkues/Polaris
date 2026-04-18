@@ -296,7 +296,7 @@ class JsonQueryGenerator:
         )
         # outlines v1 API: Generator(model, output_type) → callable that returns str
         generator = outlines.Generator(self._outlines_model, QueryPlan)
-        result: str = generator(prompt, max_tokens=512)
+        result: str = generator(prompt, max_new_tokens=512)
         return QueryPlan.model_validate_json(result)
 
     def generate_and_convert(self, tables: dict, question: str) -> tuple[QueryPlan, str]:
