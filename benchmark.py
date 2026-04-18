@@ -140,20 +140,29 @@ class PolarisModel:
 
     @torch.inference_mode()
     def generate_constrained(
-        self, message: str, tables: dict, max_new_tokens: int = 512
+        self,
+        message: str,
+        tables: dict,
+        max_new_tokens: int = 512,
+        backend: str = "xgrammar",
     ) -> str:
         """Grammar-constrained generation via Outlines CFG.
 
         Builds a per-request Polars grammar with the request's table/column
         names injected so the decoder can only emit structurally-valid
         Polars method chains referring to real tables.
+
+        `backend` selects the structured-generation engine. `xgrammar` is the
+        default because `llguidance` fails on tokenizers with nested Sequence
+        decoders (e.g. LFM2.5). Override to "llguidance" if the model/tokenizer
+        combo is compatible.
         """
         from outlines.types import CFG
         self._ensure_outlines()
         prompt = self._build_prompt(message, tables)
         grammar = build_grammar(tables)
         response = self._outlines_model(
-            prompt, CFG(grammar), max_new_tokens=max_new_tokens
+            prompt, CFG(grammar), max_new_tokens=max_new_tokens, backend=backend,
         )
         return strip_code_fence(response)
 
