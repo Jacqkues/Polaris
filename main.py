@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-MODEL_NAME = "LiquidAI/LFM2-8B-A1B"
+MODEL_NAME = "google/gemma-4-E2B-it"
 
 app = FastAPI()
 
