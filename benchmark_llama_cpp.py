@@ -39,8 +39,8 @@ from benchmark import (
 from dataset.executor import load_tpch
 from dataset.polars_grammar import build_grammar_gbnf
 
-DEFAULT_REPO = "LiquidAI/LFM2.5-1.2B-Instruct-GGUF"
-DEFAULT_FILE = "LFM2.5-1.2B-Instruct-Q8_0.gguf"
+DEFAULT_REPO = "unsloth/gemma-4-E2B-it-GGUF"
+DEFAULT_FILE = "gemma-4-E2B-it-Q4_K_S.gguf"
 
 
 def _flatten_gbnf(grammar: str) -> str:
