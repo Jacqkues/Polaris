@@ -109,68 +109,6 @@ fallback       → best of L1/L2
 
 Static validation (`looks_ok`) checks AST validity, presence of `result =`, known anti-patterns, and whether all `pl.col("x")` references exist in the schema — without executing the code.
 
-### Approach 2 — JSON query plan with schema-constrained generation
-
-`test_json_generator/` explores a different architecture: instead of generating Python directly, the model generates a **structured JSON query plan**, which a deterministic function then converts to Polars code.
-
-```
-question + schema
-    → Gemma (JSON-constrained via Outlines)
-    → QueryPlan (validated Pydantic object)
-    → json_to_polars()
-    → executable Polars code
-```
-
-The `QueryPlan` is a Pydantic model with a discriminated union of operations:
-
-```python
-class QueryPlan(BaseModel):
-    source_table: str
-    operations: list[
-        Union[FilterOp, GroupByOp, SortOp, SelectOp, JoinOp, WithColumnsOp, HeadOp]
-    ]
-```
-
-Outlines compiles the JSON schema of `QueryPlan` into a logits processor, so the model can only emit tokens that form valid JSON matching the schema. The result is then parsed with `QueryPlan.model_validate_json(result)`.
-
-The converter `json_to_polars()` is a pure function with no model calls — it deterministically renders each operation into the correct modern Polars API:
-
-```python
-# FilterOp → .filter((pl.col("x") == "val") & (...))
-# GroupByOp → .group_by(...).agg(pl.col(...).sum().alias(...))
-# JoinOp    → .join(other, left_on="a", right_on="b", how="inner")
-```
-
-**Why this is interesting**: the JSON intermediate separates *what to compute* (model's job) from *how to write it in Polars* (converter's job). The model never needs to know the exact Polars API for rank, window functions, or date arithmetic — it only needs to express intent in a simple JSON vocabulary.
-
-**Practical issues encountered**:
-
-| Issue | Root cause | Fix |
-|---|---|---|
-| `outlines.generate` not found | Outlines v1 renamed to `outlines.Generator` | Use `outlines.Generator(model, QueryPlan)` |
-| `max_tokens` kwarg rejected | Passes through to HF `model.generate` which uses `max_new_tokens` | Rename kwarg |
-| JSON truncated mid-string | `discriminator` + `oneOf` schema confuses llguidance | Remove `Field(discriminator=...)`, use plain `Union` |
-| `source_table: ":(orders)"` | Model confuses JSON format with SQL syntax | Add few-shot JSON examples in prompt |
-| `on: "col1==col2"` in join | Model writes SQL join condition in wrong field | Split in renderer: detect `==`, emit `left_on`/`right_on` |
-| `"o totalprice"` (space in column) | Constrained gen allows any string value | `_normalize_plan()` replaces space→underscore when result is a known column |
-| `n: -1` in head | No integer constraint in schema | Clamp: `max(1, op.n)` in renderer |
-
-The generation has a fallback: if the constrained pass produces invalid JSON (truncation, llguidance bug), it falls back to unconstrained greedy decoding and extracts the first `{...}` block from the output.
-
-### Results on 5 seeds
-
-After all fixes:
-
-```
-plan valid:   5/5  (100%)   JSON parsed by QueryPlan schema
-converted:    5/5  (100%)   json_to_polars produced code
-parses:       4/5   (80%)   AST-valid Python
-runs:         1/5   (20%)   executes without error
-matches:      0/5    (0%)   output matches reference
-```
-
-The remaining failures are model-quality issues (wrong column names, wrong alias names) that no amount of post-processing can fix without knowing the expected output. The JSON approach trades the Polars API hallucination problem for a semantic understanding problem.
-
 ---
 
 ## Repository structure
@@ -187,9 +125,6 @@ Polaris/
 │   ├── executor.py          # Sandboxed code execution
 │   ├── compare.py           # Column-order-invariant DataFrame comparison
 │   └── gen_tpch.py          # TPC-H data generator
-├── test_json_generator/
-│   ├── json_query_generator.py  # QueryPlan schema + json_to_polars converter
-│   └── bench_json.py            # Benchmark for the JSON generation approach
 └── data/
     ├── seeds.jsonl          # 25 validated TPC-H seeds
     ├── tpch/                # TPC-H parquet tables
@@ -211,7 +146,5 @@ Polaris/
 - The `llguidance` dependency was absent on the submission VM — the CFG-constrained path, while implemented, couldn't be tested in time.
 
 **The constrained decoding verdict**
-- CFG grammar over generated Polars code: **eliminates structural and API hallucinations by construction**, but adds 2-3× latency and requires the `llguidance` backend.
-- JSON plan with schema-constrained generation: **simpler schema, no Python grammar needed**, but pushes all semantic errors to the model's understanding of the JSON vocabulary. Interesting architecture, needs more work on prompt quality to compete with direct code generation.
 
-Both approaches share the same insight: *a prompt guides, a grammar enforces*. For a benchmark with a hard correctness criterion, the guarantee matters.
+CFG grammar over generated Polars code **eliminates structural and API hallucinations by construction**, but adds 2-3× latency and requires the `llguidance` backend. The core insight: *a prompt guides, a grammar enforces*. For a benchmark with a hard correctness criterion, the guarantee matters.
