@@ -30,7 +30,7 @@ from dataset.compare import ComparisonResult, compare_dataframes
 from dataset.executor import execute_code, load_tpch
 from dataset.polars_grammar import build_grammar
 
-MODEL_NAME = "LiquidAI/LFM2-8B-A1B"
+MODEL_NAME = "LiquidAI/LFM2.5-1.2B-Instruct"
 
 SYSTEM_PROMPT = """Return only valid Python Polars code (no markdown fences, no prose).
 
