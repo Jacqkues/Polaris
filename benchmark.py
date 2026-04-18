@@ -42,52 +42,10 @@ Rules:
 - The provided DataFrames are already in scope by name — do not recreate them with pl.DataFrame()."""
 
 
-FEWSHOT: list[tuple[dict, str, list[str], str]] = [
-    (
-        {"sales": {"product": "Utf8", "revenue": "Float64", "region": "Utf8"}},
-        "Return all sales in Europe with revenue above 100, sorted by revenue descending.",
-        ["product", "revenue", "region"],
-        'result = (\n'
-        '    sales\n'
-        '    .filter((pl.col("region") == "Europe") & (pl.col("revenue") > 100))\n'
-        '    .sort("revenue", descending=True)\n'
-        ')',
-    ),
-    (
-        {"events": {"user_id": "Int64", "event_type": "Utf8", "ts": "Datetime"}},
-        "Count events per event_type for 2024, sorted by count descending.",
-        ["event_type", "count"],
-        'result = (\n'
-        '    events\n'
-        '    .filter(pl.col("ts").dt.year() == 2024)\n'
-        '    .group_by("event_type")\n'
-        '    .agg(pl.len().alias("count"))\n'
-        '    .sort("count", descending=True)\n'
-        ')',
-    ),
-    (
-        {
-            "users": {"user_id": "Int64", "name": "Utf8"},
-            "orders": {"order_id": "Int64", "user_id": "Int64", "amount": "Float64"},
-        },
-        "For each user, return the total amount of their orders, top 5.",
-        ["name", "total"],
-        'result = (\n'
-        '    users\n'
-        '    .join(orders, on="user_id")\n'
-        '    .group_by("name")\n'
-        '    .agg(pl.col("amount").sum().alias("total"))\n'
-        '    .sort("total", descending=True)\n'
-        '    .head(5)\n'
-        ')',
-    ),
-]
-
-
 def format_schema(tables: dict) -> str:
     """Render the tables dict as a compact, model-friendly schema block.
 
-    Accepts both `{name: {col: dtype, ...}}` (used in FEWSHOT) and
+    Accepts both `{name: {col: dtype, ...}}` and
     `{name: {"columns": {col: dtype, ...}, "n_rows": int}}` (used in seeds).
     """
     lines: list[str] = []
@@ -153,14 +111,13 @@ class PolarisModel:
         tables: dict,
         expected_columns: list[str] | None = None,
     ) -> str:
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for fs_tables, fs_q, fs_cols, fs_a in FEWSHOT:
-            messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q, fs_cols)})
-            messages.append({"role": "assistant", "content": fs_a})
-        messages.append({
-            "role": "user",
-            "content": format_user_turn(tables, message, expected_columns),
-        })
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": format_user_turn(tables, message, expected_columns),
+            },
+        ]
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
