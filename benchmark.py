@@ -1,14 +1,16 @@
 """Benchmark the Polaris SLM against the validated seeds dataset.
 
-Measures four tiers of success per example: generated, parses, runs (produces
-a DataFrame), matches (output hash equals reference). Reports aggregates
-overall, by tag, and by difficulty; saves full results to JSON for before/after
-comparison across training runs.
+Measures four tiers per example: generated, parses, runs (produces a
+DataFrame), matches (structurally equals the reference parquet — column-order
+invariant, floats rounded). Reports aggregates overall + by tag + by
+difficulty. Saves per-example artifacts (generated code + actual output) to
+runs/debug/ so you can `diff` the code or open the parquet in any notebook.
 
 Usage:
   python benchmark.py                                   # full benchmark
   python benchmark.py --limit 3                         # smoke test
-  python benchmark.py --oracle                          # validate harness (100% expected)
+  python benchmark.py --oracle                          # harness self-check (100% expected)
+  python benchmark.py --debug                           # verbose diff on every failure
   python benchmark.py --out runs/baseline.json
 """
 import argparse
@@ -16,13 +18,15 @@ import ast
 import json
 import time
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 
+import polars as pl
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from dataset.compare import ComparisonResult, compare_dataframes
 from dataset.executor import execute_code, load_tpch
-from dataset.hashing import hash_dataframe
 
 MODEL_NAME = "LiquidAI/LFM2-8B-A1B"
 
@@ -124,11 +128,16 @@ class PolarisModel:
         return strip_code_fence(response)
 
 
-def evaluate_one(record: dict, generated_code: str, tables: dict) -> dict:
+def evaluate_one(
+    record: dict,
+    generated_code: str,
+    tables: dict,
+    expected: pl.DataFrame | None,
+) -> tuple[dict, pl.DataFrame | None]:
     scoped = {name: tables[name] for name in record["tables"] if name in tables}
     prompt_schemas = {name: schema["columns"] for name, schema in record["tables"].items()}
 
-    out = {
+    out: dict = {
         "id": record["id"],
         "tags": record["tags"],
         "difficulty": record["difficulty"],
@@ -137,39 +146,51 @@ def evaluate_one(record: dict, generated_code: str, tables: dict) -> dict:
         "parses": False,
         "runs": False,
         "matches": False,
+        "comparison": None,
         "error": None,
     }
 
     if not generated_code.strip():
         out["error"] = "empty generation"
-        return out
+        return out, None
 
     try:
         ast.parse(generated_code)
         out["parses"] = True
     except SyntaxError as e:
         out["error"] = f"SyntaxError: {e}"
-        return out
+        return out, None
 
     exec_result = execute_code(generated_code, scoped)
     if not exec_result.success:
         out["error"] = exec_result.error
-        return out
+        return out, None
     out["runs"] = True
 
-    actual_hash = hash_dataframe(exec_result.result)
-    out["matches"] = actual_hash == record["expected_output_hash"]
-    out["actual_n_rows"] = exec_result.result.height
-    out["actual_columns"] = exec_result.result.columns
-    if not out["matches"]:
-        out["error"] = (
-            f"output mismatch: got {exec_result.result.height} rows, "
-            f"expected {record['expected_n_rows']}"
-        )
-    return out
+    if expected is None:
+        out["error"] = "no expected parquet for this record"
+        return out, exec_result.result
+
+    cmp: ComparisonResult = compare_dataframes(exec_result.result, expected)
+    out["matches"] = cmp.match
+    out["comparison"] = asdict(cmp)
+    if not cmp.match:
+        out["error"] = cmp.summary()
+    return out, exec_result.result
 
 
-def report(results: list[dict]) -> None:
+def _stage(r: dict) -> str:
+    if r["matches"]:
+        return "match"
+    if r["runs"]:
+        cmp = r.get("comparison") or {}
+        return cmp.get("reason", "wrong-output")
+    if r["parses"]:
+        return "crash"
+    return "syntax"
+
+
+def report(results: list[dict], debug: bool = False) -> None:
     n = len(results)
     if n == 0:
         print("No results.")
@@ -211,20 +232,67 @@ def report(results: list[dict]) -> None:
             f"{sum(hits) / len(hits) * 100:5.1f}%"
         )
 
+    stage_counts: dict[str, int] = defaultdict(int)
+    for r in results:
+        stage_counts[_stage(r)] += 1
+    print("\n  Failure stages:")
+    for stage in ("syntax", "crash", "empty_actual", "column_set", "row_count", "content"):
+        if stage_counts.get(stage):
+            print(f"    {stage:15s}  {stage_counts[stage]}")
+
     failures = [r for r in results if not r["matches"]]
     if failures:
         print(f"\n  Failures ({len(failures)}):")
         for r in failures:
-            stage = (
-                "wrong-output" if r["runs"]
-                else "crash" if r["parses"]
-                else "syntax"
-            )
+            stage = _stage(r)
             print(f"    [{stage:12s}] {r['id']:35s}  {r.get('error', '')}")
+
+    if debug and failures:
+        print(f"\n{'=' * 70}")
+        print("DEBUG DETAILS")
+        print(f"{'=' * 70}")
+        for r in failures:
+            _print_debug(r)
     print()
 
 
-def run(seeds_path: Path, data_dir: Path, limit: int | None, oracle: bool) -> list[dict]:
+def _print_debug(r: dict) -> None:
+    print(f"\n--- {r['id']}  [{_stage(r)}] ---")
+    print(f"tags: {r['tags']}  difficulty: d{r['difficulty']}")
+    print(f"error: {r.get('error')}")
+    print("\n>>> generated code:")
+    print(r["generated_code"] or "<empty>")
+    cmp = r.get("comparison")
+    if cmp:
+        print(f"\n>>> columns — actual: {cmp['actual_columns']}")
+        print(f">>> columns — expected: {cmp['expected_columns']}")
+        if cmp.get("missing_columns"):
+            print(f">>> missing: {cmp['missing_columns']}")
+        if cmp.get("extra_columns"):
+            print(f">>> extra:   {cmp['extra_columns']}")
+        print(f"\n>>> rows — actual: {cmp['actual_n_rows']}  expected: {cmp['expected_n_rows']}")
+        print("\n>>> actual preview:")
+        print(cmp["actual_preview"])
+        print("\n>>> expected preview:")
+        print(cmp["expected_preview"])
+        if cmp.get("detail"):
+            print(f"\n>>> detail: {cmp['detail']}")
+
+
+def load_expected(expected_dir: Path) -> dict[str, pl.DataFrame]:
+    if not expected_dir.exists():
+        return {}
+    return {p.stem: pl.read_parquet(p) for p in expected_dir.glob("*.parquet")}
+
+
+def run(
+    seeds_path: Path,
+    data_dir: Path,
+    expected_dir: Path,
+    debug_dir: Path | None,
+    limit: int | None,
+    oracle: bool,
+) -> list[dict]:
     records = [
         json.loads(line) for line in seeds_path.read_text().splitlines() if line.strip()
     ]
@@ -234,6 +302,16 @@ def run(seeds_path: Path, data_dir: Path, limit: int | None, oracle: bool) -> li
     tables = load_tpch(data_dir)
     if not tables:
         raise SystemExit(f"No TPC-H data in {data_dir}. Run `python -m dataset.gen_tpch` first.")
+
+    expected = load_expected(expected_dir)
+    if not expected:
+        print(
+            f"WARN: no expected parquets in {expected_dir}. "
+            "Run `python -m dataset.build_seeds` to (re)produce them."
+        )
+
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     model = None if oracle else PolarisModel()
 
@@ -245,32 +323,42 @@ def run(seeds_path: Path, data_dir: Path, limit: int | None, oracle: bool) -> li
         t0 = time.time()
         if oracle:
             generated = rec["reference_code"]
+            gen_error = None
         else:
             try:
                 generated = model.generate(rec["question"], prompt_schemas)
+                gen_error = None
             except Exception as e:
                 generated = ""
+                gen_error = str(e)
                 print(f"GEN ERROR: {e}")
-                latency = time.time() - t0
-                result = {
-                    "id": rec["id"],
-                    "tags": rec["tags"],
-                    "difficulty": rec["difficulty"],
-                    "prompt_schemas": prompt_schemas,
-                    "generated_code": "",
-                    "parses": False,
-                    "runs": False,
-                    "matches": False,
-                    "error": f"generation failed: {e}",
-                    "latency_sec": latency,
-                }
-                results.append(result)
-                continue
         latency = time.time() - t0
 
-        result = evaluate_one(rec, generated, tables)
+        if gen_error:
+            result = {
+                "id": rec["id"],
+                "tags": rec["tags"],
+                "difficulty": rec["difficulty"],
+                "prompt_schemas": prompt_schemas,
+                "generated_code": "",
+                "parses": False,
+                "runs": False,
+                "matches": False,
+                "comparison": None,
+                "error": f"generation failed: {gen_error}",
+                "latency_sec": latency,
+            }
+            results.append(result)
+            continue
+
+        result, actual_df = evaluate_one(rec, generated, tables, expected.get(rec["id"]))
         result["latency_sec"] = latency
         results.append(result)
+
+        if debug_dir is not None:
+            (debug_dir / f"{rec['id']}.generated.py").write_text(generated or "")
+            if actual_df is not None:
+                actual_df.write_parquet(debug_dir / f"{rec['id']}.actual.parquet")
 
         flag = (
             "OK   " if result["matches"]
@@ -287,20 +375,33 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--seeds", type=Path, default=Path("data/seeds.jsonl"))
     p.add_argument("--data", type=Path, default=Path("data/tpch"))
+    p.add_argument("--expected", type=Path, default=Path("data/expected"))
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--oracle", action="store_true",
                    help="Use reference_code as generation (validates the harness)")
+    p.add_argument("--debug", action="store_true",
+                   help="Print full diff (code + previews) for each failure")
+    p.add_argument("--debug-dir", type=Path, default=Path("runs/debug"),
+                   help="Directory for per-example artifacts (generated code + actual parquet)")
+    p.add_argument("--no-debug-dir", action="store_true",
+                   help="Skip writing per-example artifact files")
     p.add_argument("--out", type=Path, default=None,
-                   help="Optional path to save results JSON")
+                   help="Optional path to save aggregate results JSON")
     args = p.parse_args()
 
-    results = run(args.seeds, args.data, args.limit, args.oracle)
-    report(results)
+    debug_dir = None if args.no_debug_dir else args.debug_dir
+
+    results = run(
+        args.seeds, args.data, args.expected, debug_dir, args.limit, args.oracle
+    )
+    report(results, debug=args.debug)
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(results, indent=2, default=str))
         print(f"Saved results → {args.out}")
+    if debug_dir is not None:
+        print(f"Per-example artifacts → {debug_dir}/")
 
     return 0
 

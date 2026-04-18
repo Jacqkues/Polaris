@@ -4,8 +4,9 @@ emit the canonical JSONL dataset.
 Usage: python -m dataset.build_seeds
 """
 import argparse
-import json
 from pathlib import Path
+
+import polars as pl
 
 from dataset.executor import execute_code, load_tpch
 from dataset.hashing import hash_dataframe
@@ -13,10 +14,12 @@ from dataset.schema import TPCH_TABLES, DatasetRecord, TableSchema
 from dataset.seeds import SEEDS
 
 
-def build_record(seed: dict, tables: dict, table_row_counts: dict[str, int]) -> tuple[DatasetRecord | None, str | None]:
+def build_record(
+    seed: dict, tables: dict, table_row_counts: dict[str, int]
+) -> tuple[DatasetRecord | None, "pl.DataFrame | None", str | None]:
     result = execute_code(seed["reference_code"], tables)
     if not result.success:
-        return None, result.error
+        return None, None, result.error
 
     df = result.result
     used_tables = {
@@ -34,10 +37,10 @@ def build_record(seed: dict, tables: dict, table_row_counts: dict[str, int]) -> 
         expected_n_rows=df.height,
         expected_columns=df.columns,
     )
-    return record, None
+    return record, df, None
 
 
-def main(data_dir: Path, out_path: Path) -> int:
+def main(data_dir: Path, out_path: Path, expected_dir: Path) -> int:
     tables = load_tpch(data_dir)
     if not tables:
         print(f"No parquet files found in {data_dir}. Run: python -m dataset.gen_tpch first.")
@@ -46,18 +49,23 @@ def main(data_dir: Path, out_path: Path) -> int:
     print(f"Loaded {len(tables)} TPC-H tables: " + ", ".join(f"{k}={v}" for k, v in row_counts.items()))
     print()
 
+    expected_dir.mkdir(parents=True, exist_ok=True)
+
     passed, failed = 0, 0
     records: list[DatasetRecord] = []
     for seed in SEEDS:
-        record, error = build_record(seed, tables, row_counts)
+        record, df, error = build_record(seed, tables, row_counts)
         if error:
             print(f"  FAIL  {seed['id']}: {error}")
             failed += 1
             continue
         records.append(record)
+        expected_path = expected_dir / f"{record.id}.parquet"
+        df.write_parquet(expected_path)
         print(
             f"  OK    {seed['id']:35s}  "
-            f"rows={record.expected_n_rows:>6d}  cols={len(record.expected_columns)}"
+            f"rows={record.expected_n_rows:>6d}  cols={len(record.expected_columns)}  "
+            f"→ {expected_path.name}"
         )
         passed += 1
 
@@ -66,7 +74,7 @@ def main(data_dir: Path, out_path: Path) -> int:
         for record in records:
             f.write(record.model_dump_json() + "\n")
 
-    print(f"\n{passed} passed, {failed} failed → {out_path}")
+    print(f"\n{passed} passed, {failed} failed → {out_path}  (expected outputs in {expected_dir})")
     return 0 if failed == 0 else 1
 
 
@@ -74,5 +82,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--data", type=Path, default=Path("data/tpch"))
     p.add_argument("--out", type=Path, default=Path("data/seeds.jsonl"))
+    p.add_argument("--expected", type=Path, default=Path("data/expected"))
     args = p.parse_args()
-    raise SystemExit(main(args.data, args.out))
+    raise SystemExit(main(args.data, args.out, args.expected))
