@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.ipynb_checkpoints/
+.DS_Store
+
+# Generated TPC-H data (large, deterministic — re-generate locally)
+data/tpch/
