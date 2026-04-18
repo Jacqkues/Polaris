@@ -193,8 +193,6 @@ def test_format_user_turn_strict_appends_column_reminder() -> None:
     # Per-table grouping preserved so the model can associate cols with tables
     assert "customer:" in turn
     assert "payment:" in turn
-    # And an explicit reminder that selecting all is wrong
-    assert "not all" in turn.lower()
 
 
 def test_format_strict_block_empty_tables_returns_empty() -> None:

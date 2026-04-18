@@ -169,8 +169,7 @@ def _format_strict_block(tables: dict) -> str:
     return (
         "Available columns (any reference to a name NOT in this list will "
         "fail with ColumnNotFoundError):\n"
-        f"{body}\n"
-        "Select only the columns the question asks for — not all of them."
+        f"{body}"
     )
 
 
