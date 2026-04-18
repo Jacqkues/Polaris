@@ -116,7 +116,12 @@ atom_with_methods: expr_atom (expr_method)* | literal_atom
 ?literal_atom: FLOAT | INT | STRING | COLSTR | BOOL
 
 paren_expr: "(" expr ")"
-col_atom: "pl.col" "(" colref ")"
+// pl.col accepts a schema column (strict) OR a simple identifier-shaped
+// string, so alias names created mid-chain (.alias("revenue") then
+// pl.col("revenue")) remain expressible — but garbage like pl.col("x`,")
+// is rejected, unlike a generic STRING fallback.
+col_atom: "pl.col" "(" (COLSTR | IDSTR) ")"
+IDSTR: /"[A-Za-z_][A-Za-z0-9_]*"/
 pl_len: "pl.len" "(" ")"
 pl_date: "pl.date" "(" INT "," INT "," INT ")"
 
@@ -299,7 +304,8 @@ expratom ::= colatom | pllen | pldate | parenexpr
 literalatom ::= float | int | string | colstr | bool
 
 parenexpr ::= "(" ws expr ws ")"
-colatom ::= "pl.col" ws "(" ws colref ws ")"
+colatom ::= "pl.col" ws "(" ws (colstr | identstr) ws ")"
+identstr ::= "\"" [a-zA-Z_] [a-zA-Z0-9_]* "\""
 pllen ::= "pl.len" ws "(" ws ")"
 pldate ::= "pl.date" ws "(" ws int ws "," ws int ws "," ws int ws ")"
 
@@ -496,6 +502,12 @@ def _self_test() -> int:
         ("raw-python-expr", 'result = sum([1,2,3])'),
         ("distinct-not-polars", 'result = customer.distinct()'),
         ("string-literal-chained-over", 'result = customer.select("c_name".over("c_custkey"))'),
+        # Gibberish-in-pl.col (backtick, comma, spaces) is rejected. Plain
+        # identifier-shaped unknown names are *accepted* so mid-chain aliases
+        # like `.alias("revenue")` followed by `pl.col("revenue")` remain
+        # expressible — runtime catches truly invalid names.
+        ("pl-col-with-garbage", 'result = customer.filter(pl.col("c_custkey`, ") == 1)'),
+        ("pl-col-with-space", 'result = customer.filter(pl.col("c name") == 1)'),
     ]
     neg_pass = 0
     for name, code in neg_cases:
