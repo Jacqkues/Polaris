@@ -122,9 +122,13 @@ class LlamaCppModel:
         tables: dict,
         max_new_tokens: int = 512,
         constrained: bool = True,
+        show_prompt: bool = False,
     ) -> str:
+        messages = self._messages(message, tables)
+        if show_prompt:
+            _print_prompt(messages)
         kwargs: dict = {
-            "messages": self._messages(message, tables),
+            "messages": messages,
             "max_tokens": max_new_tokens,
             "temperature": 0.0,
         }
@@ -133,6 +137,17 @@ class LlamaCppModel:
         out = self.llm.create_chat_completion(**kwargs)
         text = out["choices"][0]["message"]["content"]
         return strip_code_fence(text)
+
+
+def _print_prompt(messages: list[dict]) -> None:
+    """Print the full chat-template input so you can see exactly what the model gets."""
+    print("\n" + "=" * 70)
+    print("PROMPT (chat messages -> model)")
+    print("=" * 70)
+    for m in messages:
+        print(f"\n---- [{m['role']}] ----")
+        print(m["content"])
+    print("=" * 70)
 
 
 def run(
@@ -145,6 +160,7 @@ def run(
     repo: str,
     filename: str,
     local_path: str | None,
+    show_prompt: bool = False,
 ) -> list[dict]:
     records = [
         json.loads(line) for line in seeds_path.read_text().splitlines() if line.strip()
@@ -176,7 +192,8 @@ def run(
         t0 = time.time()
         try:
             generated = model.generate(
-                rec["question"], prompt_schemas, constrained=constrained
+                rec["question"], prompt_schemas,
+                constrained=constrained, show_prompt=show_prompt,
             )
             gen_error = None
         except Exception as e:
@@ -237,6 +254,8 @@ def main() -> int:
                    help="Path to a local GGUF file (overrides --repo/--file)")
     p.add_argument("--debug", action="store_true",
                    help="Print full diff (code + previews) for each failure")
+    p.add_argument("--show-prompt", action="store_true",
+                   help="Print the full chat prompt sent to the model before each generation")
     p.add_argument("--debug-dir", type=Path, default=Path("runs/debug_llama_cpp"))
     p.add_argument("--no-debug-dir", action="store_true")
     p.add_argument("--out", type=Path, default=None)
@@ -254,6 +273,7 @@ def main() -> int:
         repo=args.repo,
         filename=args.filename,
         local_path=args.local,
+        show_prompt=args.show_prompt,
     )
     report(results, debug=args.debug)
 
