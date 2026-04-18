@@ -94,14 +94,14 @@ class GemmaModel:
         )
         return strip_code_fence(response)
 
-    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
+    def generate(self, message: str, tables: dict, max_new_tokens: int = 10000) -> str:
         """Fast greedy generation with the prompt v2 + few-shot context."""
         text = self._build_prompt(message, tables)
         return self._greedy_from_text(text, max_new_tokens)
 
     @torch.inference_mode()
     def generate_constrained(
-        self, message: str, tables: dict, max_new_tokens: int = 512
+        self, message: str, tables: dict, max_new_tokens: int = 10000
     ) -> str:
         """Grammar-constrained generation via Outlines CFG.
 
@@ -129,7 +129,7 @@ class GemmaModel:
         tables: dict,
         previous_code: str,
         feedback: str,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 10000,
     ) -> str:
         """Retry generation after a failed attempt.
 
