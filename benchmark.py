@@ -81,8 +81,34 @@ FEWSHOT: list[tuple[dict, str, str]] = [
 ]
 
 
+def format_schema(tables: dict) -> str:
+    """Render the tables dict as a compact, model-friendly schema block.
+
+    Accepts both `{name: {col: dtype, ...}}` (used in FEWSHOT) and
+    `{name: {"columns": {col: dtype, ...}, "n_rows": int}}` (used in seeds).
+    """
+    lines: list[str] = []
+    for name, meta in tables.items():
+        if isinstance(meta, dict) and "columns" in meta and isinstance(meta["columns"], dict):
+            cols = meta["columns"]
+            n_rows = meta.get("n_rows")
+        else:
+            cols = meta
+            n_rows = None
+        header = f"- {name}"
+        if n_rows is not None:
+            header += f"  ({n_rows} rows)"
+        lines.append(header)
+        for col, dtype in cols.items():
+            lines.append(f"    {col}: {dtype}")
+    return "\n".join(lines)
+
+
 def format_user_turn(tables: dict, question: str) -> str:
-    return f"Datasets:\n{json.dumps(tables, indent=2)}\n\nQuestion: {question}"
+    return (
+        f"Schema:\n{format_schema(tables)}\n\n"
+        f"Question: {question}"
+    )
 
 
 def strip_code_fence(text: str) -> str:
