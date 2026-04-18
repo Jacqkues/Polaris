@@ -16,7 +16,8 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-
+from vllm import LLM, SamplingParams
+from vllm.sampling_params import StructuredOutputsParams
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -112,12 +113,7 @@ CASES = [
 
 
 def run() -> int:
-    try:
-        from vllm import LLM, SamplingParams
-        from vllm.sampling_params import StructuredOutputsParams
-    except ImportError:
-        print("vllm is not installed. Run: pip install vllm")
-        return 1
+   
 
     print(f"Loading {MODEL} with vLLM...")
     llm = LLM(model=MODEL, dtype="float16")
