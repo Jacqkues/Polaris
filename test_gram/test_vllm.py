@@ -119,7 +119,7 @@ def run() -> int:
         return 1
 
     print(f"Loading {GEMMA_MODEL} with vLLM...")
-    llm = LLM(model=GEMMA_MODEL, dtype="float16", max_model_len=131072)
+    llm = LLM(model=GEMMA_MODEL, dtype="float16")
 
     passed = 0
     failed = 0
