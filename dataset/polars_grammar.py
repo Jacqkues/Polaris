@@ -193,14 +193,13 @@ def _col_terminal(columns: list[str]) -> str:
     return f"COLSTR.2: {alts}"
 
 
-def build_grammar(tables: dict) -> str:
-    """Return a Lark grammar string specialized for the given table schemas.
+def _extract_schema(tables: dict) -> tuple[list[str], list[str]]:
+    """Return `(sorted_table_names, sorted_column_names)` from a tables dict.
 
-    `tables` follows the shape used in the project seeds:
-        {"customer": {"columns": {"c_name": "Utf8", ...}, "n_rows": ...}, ...}
-
-    It also accepts the shape {"table": {"columns": [...]}} or plain
-    {"table": ["col1", "col2"]}.
+    Accepts the shapes used across the project:
+        {"customer": {"columns": {"c_name": "Utf8", ...}, "n_rows": 1500}}
+        {"customer": {"c_name": "Utf8", ...}}
+        {"customer": ["c_name", "c_custkey"]}
     """
     if not tables:
         raise ValueError("tables must be non-empty to build a grammar")
@@ -222,12 +221,154 @@ def build_grammar(tables: dict) -> str:
     if not all_cols:
         raise ValueError("no columns found across provided tables")
 
-    # Preserve a stable order so the generated grammar is reproducible.
-    table_names = sorted(set(table_names))
-    col_list = sorted(all_cols)
+    return sorted(set(table_names)), sorted(all_cols)
 
+
+def build_grammar(tables: dict) -> str:
+    """Return a Lark grammar string specialized for the given table schemas.
+
+    Used by the local self-test (Lark parses faster than any GBNF runtime and
+    gives clean diagnostics). For constrained decoding at inference time via
+    xgrammar, use `build_grammar_gbnf` instead.
+    """
+    table_names, col_list = _extract_schema(tables)
     grammar = BASE_GRAMMAR.replace("%TABLENAME_DECL%", _table_terminal(table_names))
     grammar = grammar.replace("%COLSTR_DECL%", _col_terminal(col_list))
+    return grammar
+
+
+# GBNF (llama.cpp-style EBNF) grammar — the format xgrammar and other
+# structured-generation runtimes expect. Semantically equivalent to
+# BASE_GRAMMAR above but expressed without Lark-specific features:
+#   - `::=` instead of `:` for rule definition
+#   - whitespace is NOT auto-ignored; we thread `ws` between tokens
+#   - no terminal priorities (ambiguity between string and colstr is
+#     resolved by the parser exploring both branches — both are valid
+#     parses so correctness is preserved)
+BASE_GRAMMAR_GBNF = r"""
+root ::= assign
+assign ::= "result" ws "=" ws rhs
+rhs ::= "(" ws pipeline ws ")" | pipeline
+pipeline ::= tableref (ws method)+
+tableref ::= tablename
+
+method ::= "." ws methcall
+
+methcall ::= filtercall | selectcall | withcolscall | groupbycall
+           | aggcall | joincall | sortcall | headcall | limitcall
+           | uniquecall | renamecall | distinctcall
+
+filtercall ::= "filter" ws "(" ws expr ws ")"
+selectcall ::= "select" ws "(" ws exprorlist ws ")"
+withcolscall ::= "with_columns" ws "(" ws exprorlist ws ")"
+aggcall ::= "agg" ws "(" ws exprorlist ws ")"
+
+groupbycall ::= "group_by" ws "(" ws colreforlist ws ")"
+
+sortcall ::= "sort" ws "(" ws sortkey (ws "," ws sortkw)? ws ")"
+sortkey ::= colref | colreflist
+sortkw ::= "descending" ws "=" ws (bool | boollist)
+
+headcall ::= "head" ws "(" ws int ws ")"
+limitcall ::= "limit" ws "(" ws int ws ")"
+
+uniquecall ::= "unique" ws "(" ws (colreforlist)? ws ")"
+distinctcall ::= "distinct" ws "(" ws (colreforlist)? ws ")"
+
+renamecall ::= "rename" ws "(" ws "{" ws renamepair (ws "," ws renamepair)* (ws ",")? ws "}" ws ")"
+renamepair ::= colref ws ":" ws string
+
+joincall ::= "join" ws "(" ws tablename (ws "," ws joinkw)+ ws ")"
+joinkw ::= "left_on" ws "=" ws colref
+         | "right_on" ws "=" ws colref
+         | "on" ws "=" ws colreforlist
+         | "how" ws "=" ws string
+
+colref ::= colstr | string
+colreforlist ::= colref | colreflist
+colreflist ::= "[" ws colref (ws "," ws colref)* (ws ",")? ws "]"
+boollist ::= "[" ws bool (ws "," ws bool)* (ws ",")? ws "]"
+exprorlist ::= expr | exprlist
+exprlist ::= "[" ws expr (ws "," ws expr)* (ws ",")? ws "]"
+
+expr ::= orexpr
+orexpr ::= andexpr (ws "|" ws andexpr)*
+andexpr ::= notexpr (ws "&" ws notexpr)*
+notexpr ::= "~" ws notexpr | cmpexpr
+cmpexpr ::= sumexpr (ws cmpop ws sumexpr)?
+cmpop ::= "==" | "!=" | "<=" | ">=" | "<" | ">"
+sumexpr ::= prodexpr (ws sumop ws prodexpr)*
+sumop ::= "+" | "-"
+prodexpr ::= unary (ws prodop ws unary)*
+prodop ::= "*" | "/"
+unary ::= "-" ws atomwithmethods | atomwithmethods
+
+atomwithmethods ::= atom (exprmethod)*
+
+atom ::= colatom | pllen | pldate | parenexpr | float | int | string | colstr | bool
+
+parenexpr ::= "(" ws expr ws ")"
+colatom ::= "pl.col" ws "(" ws colref ws ")"
+pllen ::= "pl.len" ws "(" ws ")"
+pldate ::= "pl.date" ws "(" ws int ws "," ws int ws "," ws int ws ")"
+
+exprmethod ::= "." ws mcall
+mcall ::= malias | magg | misbetween | mrank | mover | mcast | mnsstr | mnsdt
+malias ::= "alias" ws "(" ws string ws ")"
+magg ::= aggname ws "(" ws ")"
+aggname ::= "sum" | "mean" | "min" | "max" | "count" | "n_unique" | "first" | "last" | "len"
+misbetween ::= "is_between" ws "(" ws expr ws "," ws expr ws ")"
+mrank ::= "rank" ws "(" ws (rankkw (ws "," ws rankkw)*)? ws ")"
+rankkw ::= "method" ws "=" ws string | "descending" ws "=" ws bool
+mover ::= "over" ws "(" ws colreforlist ws ")"
+mcast ::= "cast" ws "(" ws pltype ws ")"
+pltype ::= "pl.Int64" | "pl.Int32" | "pl.Float64" | "pl.Float32" | "pl.Utf8" | "pl.String" | "pl.Date" | "pl.Datetime" | "pl.Boolean"
+
+mnsstr ::= "str" ws "." ws strmeth
+strmeth ::= strmcontains | strmsw | strmew | strmlower | strmupper | strmlen
+strmcontains ::= "contains" ws "(" ws string ws ")"
+strmsw ::= "starts_with" ws "(" ws string ws ")"
+strmew ::= "ends_with" ws "(" ws string ws ")"
+strmlower ::= "to_lowercase" ws "(" ws ")"
+strmupper ::= "to_uppercase" ws "(" ws ")"
+strmlen ::= "len_chars" ws "(" ws ")"
+
+mnsdt ::= "dt" ws "." ws dtmeth
+dtmeth ::= "year" ws "(" ws ")" | "month" ws "(" ws ")" | "day" ws "(" ws ")"
+
+bool ::= "True" | "False"
+int ::= [0-9]+
+float ::= [0-9]+ "." [0-9]+
+string ::= "\"" ([^"\\] | "\\" [\x00-\x7f])* "\""
+ws ::= [ \t\n\r]*
+
+%TABLENAME_GBNF%
+%COLSTR_GBNF%
+"""
+
+
+def _gbnf_escape(s: str) -> str:
+    """Escape a literal string so it can be embedded in a GBNF `"..."` terminal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _table_gbnf(tables: list[str]) -> str:
+    alts = " | ".join(f'"{_gbnf_escape(t)}"' for t in tables)
+    return f"tablename ::= {alts}"
+
+
+def _col_gbnf(columns: list[str]) -> str:
+    # Each alternative matches the quoted form as seen in source, e.g. "c_name".
+    alts = " | ".join(f'"\\"{_gbnf_escape(c)}\\""' for c in columns)
+    return f"colstr ::= {alts}"
+
+
+def build_grammar_gbnf(tables: dict) -> str:
+    """Return a GBNF grammar string (for xgrammar / llama.cpp-style engines)
+    specialized for the given table schemas."""
+    table_names, col_list = _extract_schema(tables)
+    grammar = BASE_GRAMMAR_GBNF.replace("%TABLENAME_GBNF%", _table_gbnf(table_names))
+    grammar = grammar.replace("%COLSTR_GBNF%", _col_gbnf(col_list))
     return grammar
 
 

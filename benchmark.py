@@ -28,7 +28,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dataset.compare import ComparisonResult, compare_dataframes
 from dataset.executor import execute_code, load_tpch
-from dataset.polars_grammar import build_grammar
+from dataset.polars_grammar import build_grammar_gbnf
 
 MODEL_NAME = "LiquidAI/LFM2.5-1.2B-Instruct"
 
@@ -148,19 +148,19 @@ class PolarisModel:
     ) -> str:
         """Grammar-constrained generation via Outlines CFG.
 
-        Builds a per-request Polars grammar with the request's table/column
-        names injected so the decoder can only emit structurally-valid
-        Polars method chains referring to real tables.
+        Builds a per-request Polars grammar (GBNF form) with the request's
+        table/column names injected so the decoder can only emit structurally-
+        valid Polars method chains referring to real tables.
 
-        `backend` selects the structured-generation engine. `xgrammar` is the
-        default because `llguidance` fails on tokenizers with nested Sequence
-        decoders (e.g. LFM2.5). Override to "llguidance" if the model/tokenizer
-        combo is compatible.
+        `backend="xgrammar"` because llguidance fails on tokenizers with
+        nested Sequence decoders (e.g. LFM2.5); xgrammar ingests GBNF directly
+        and doesn't require the tokenizer-decoder introspection that trips up
+        llguidance.
         """
         from outlines.types import CFG
         self._ensure_outlines()
         prompt = self._build_prompt(message, tables)
-        grammar = build_grammar(tables)
+        grammar = build_grammar_gbnf(tables)
         response = self._outlines_model(
             prompt, CFG(grammar), max_new_tokens=max_new_tokens, backend=backend,
         )
