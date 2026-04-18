@@ -22,7 +22,7 @@ from llama_cpp import Llama, LlamaGrammar
 _llm = Llama.from_pretrained(
     repo_id=DEFAULT_REPO,
     filename=DEFAULT_FILE,
-    n_ctx=4096,
+    n_ctx=131072,
     n_gpu_layers=-1,
     verbose=False,
 )

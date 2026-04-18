@@ -1,14 +1,19 @@
-"""Extended grammar-constrained tests using test_gram.build_gbnf + llama_cpp.
+"""Grammar-constrained Polars generation using pygbnf + vLLM (gemma-4-E2B-it).
 
-Loads the model once, then runs multiple test cases with different schemas
-and tasks. Each result is validated against the project's Lark grammar.
+vLLM applies the GBNF grammar via xgrammar during inference — same grammar as
+test_gram.py but without llama_cpp. Faster on GPU thanks to vLLM's continuous
+batching and PagedAttention.
+
+Requires:
+    pip install vllm pygbnf
 
 Run:
-    python -m test_gram.test_more
+    python -m test_gram.test_vllm
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -16,11 +21,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from dataset.polars_grammar import validate as lark_validate  # noqa: E402
-from test_gram.test_gram import DEFAULT_FILE, DEFAULT_REPO, build_gbnf  # noqa: E402
+from test_gram.test_gram import build_gbnf  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Test cases: (name, schema, task)
-# ---------------------------------------------------------------------------
+GEMMA_MODEL = "google/gemma-4-E2B-it"
+
+SYSTEM = (
+    "Return only valid Python Polars code (no markdown, no comments). "
+    "Assign the final DataFrame to `result`. "
+    "Use only the tables and columns from the schema provided."
+)
 
 CASES = [
     (
@@ -104,48 +113,35 @@ CASES = [
 
 def run() -> int:
     try:
-        from llama_cpp import Llama, LlamaGrammar
+        from vllm import LLM, SamplingParams
     except ImportError:
-        print("llama-cpp-python not installed.")
+        print("vllm is not installed. Run: pip install vllm")
         return 1
 
-    print(f"Loading model {DEFAULT_FILE}...")
-    llm = Llama.from_pretrained(
-        repo_id=DEFAULT_REPO,
-        filename=DEFAULT_FILE,
-        n_ctx=131072,
-        n_gpu_layers=-1,
-        verbose=False,
-    )
-
-    system = (
-        "Return only valid Python Polars code (no markdown, no comments). "
-        "Assign the final DataFrame to `result`. "
-        "Use only the tables and columns from the schema provided."
-    )
+    print(f"Loading {GEMMA_MODEL} with vLLM...")
+    llm = LLM(model=GEMMA_MODEL, dtype="float16", max_model_len=131072)
 
     passed = 0
     failed = 0
 
     for name, schema, task in CASES:
-        import json
-        prompt = (
-            f"Schema: {json.dumps(schema)}\n"
-            f"Task: {task}"
-        )
+        prompt = f"Schema: {json.dumps(schema)}\nTask: {task}"
         gbnf = build_gbnf(schema)
-        grammar = LlamaGrammar.from_string(gbnf)
 
-        out = llm.create_chat_completion(
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=512,
+            guided_grammar=gbnf,
+        )
+
+        outputs = llm.chat(
             messages=[
-                {"role": "system", "content": system},
+                {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": prompt},
             ],
-            grammar=grammar,
-            max_tokens=256,
-            temperature=0.0,
+            sampling_params=sampling_params,
         )
-        text = out["choices"][0]["message"]["content"].strip()
+        text = outputs[0].outputs[0].text.strip()
         ok, err = lark_validate(text, schema)
 
         status = "OK  " if ok else "FAIL"
