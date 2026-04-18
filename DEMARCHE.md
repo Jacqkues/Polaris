@@ -225,28 +225,23 @@ Autres échecs récurrents :
 
 ---
 
-## 7. Optimisations explorées
+## 7. Optimisations — à décider
 
-> Basées sur le diagnostic de la section 6 : le blocker principal est l'hallucination d'APIs Polars obsolètes.
+> Les pistes d'optimisation sont analysées à part dans **[OPTIMISATIONS.md](./OPTIMISATIONS.md)** (brainstorming, grille d'analyse, verdicts, risques).
+>
+> Cette section sera remplie **au fur et à mesure** que la team valide et implémente chaque option.
 
-### Prompt engineering (priorité #1)
+### Implémentées
 
-- [ ] **Ajouter un cheatsheet Polars moderne** dans le system prompt (liste des APIs valides + celles à NE PAS utiliser)
-- [ ] **Few-shot examples** couvrant les tags où on pourrit : `agg`, `groupby`, `join`, `window`
-- [ ] Enrichir le schéma injecté avec les **types** de colonnes, pas juste les noms
-- [ ] Instruction plus explicite sur `result = ...` (variable finale)
+*(rien pour l'instant)*
 
-### Inférence
+### En cours
 
-- [ ] Réduire `max_new_tokens` (256 → 200) si les réponses tiennent largement dedans → gain sur T
-- [ ] `torch.compile` pour accélérer la génération (si stable avec Gemma)
-- [ ] Tester `enable_thinking=True` sur les difficultés hautes (d3-d5) : trade-off T vs N ?
+*(rien pour l'instant)*
 
-### Post-traitement / boucle d'auto-correction
+### Écartées après test
 
-- [ ] Si `exec_result.error` contient `ColumnNotFoundError` : re-prompter avec l'erreur + liste des colonnes valides
-- [ ] Si `AttributeError` sur une API obsolète : retry avec injection de la bonne API
-- [ ] Budget token max pour éviter d'exploser T sur les retries
+*(rien pour l'instant)*
 
 ---
 

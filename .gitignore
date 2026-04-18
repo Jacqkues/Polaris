@@ -7,3 +7,5 @@ __pycache__/
 
 # Generated TPC-H data (large, deterministic — re-generate locally)
 data/tpch/
+
+OPTIMISATIONS.md
