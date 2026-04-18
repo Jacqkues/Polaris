@@ -1,0 +1,123 @@
+root ::= assign
+
+ws ::= [ \t\n\r]*
+tablename ::= "customer"
+colstr ::= "\"c_acctbal\"" |
+  "\"c_custkey\"" |
+  "\"c_mktsegment\"" |
+  "\"c_name\""
+identstr ::= "\"" [a-zA-Z_] [a-zA-Z0-9_]* "\""
+colref ::= colstr | identstr
+colref-list ::= "[" ws colref (ws "," ws colref)* (ws ",")? ws "]"
+colref-or-list ::= colref | colref-list
+bool-val ::= "True" | "False"
+string ::= "\"" [^"]* "\""
+int-val ::= [0123456789]+
+float-val ::= [0123456789]+ "." [0123456789]+
+pl-type ::= "pl.Int64" |
+  "pl.Int32" |
+  "pl.Float64" |
+  "pl.Float32" |
+  "pl.Utf8" |
+  "pl.String" |
+  "pl.Date" |
+  "pl.Datetime" |
+  "pl.Boolean"
+agg-name ::= "sum" |
+  "mean" |
+  "min" |
+  "max" |
+  "count" |
+  "n_unique" |
+  "first" |
+  "last" |
+  "len"
+m-alias ::= "alias" ws "(" ws string ws ")"
+m-agg ::= agg-name ws "(" ws ")"
+m-is-between ::= "is_between" ws "(" ws expr ws "," ws expr ws ")"
+rank-kw ::= "method" ws "=" ws string | "descending" ws "=" ws bool-val
+m-rank ::= "rank" ws "(" ws (rank-kw (ws "," ws rank-kw)*)? ws ")"
+m-over ::= "over" ws "(" ws colref-or-list ws ")"
+m-cast ::= "cast" ws "(" ws pl-type ws ")"
+str-meth ::= "contains" ws "(" ws string ws ")" |
+  "starts_with" ws "(" ws string ws ")" |
+  "ends_with" ws "(" ws string ws ")" |
+  "to_lowercase" ws "(" ws ")" |
+  "to_uppercase" ws "(" ws ")" |
+  "len_chars" ws "(" ws ")"
+m-str ::= "str" ws "." ws str-meth
+dt-meth ::= "year" ws "(" ws ")" |
+  "month" ws "(" ws ")" |
+  "day" ws "(" ws ")"
+m-dt ::= "dt" ws "." ws dt-meth
+method-call ::= m-alias |
+  m-agg |
+  m-is-between |
+  m-rank |
+  m-over |
+  m-cast |
+  m-str |
+  m-dt
+expr-method ::= "." ws method-call
+col-atom ::= "pl.col" ws "(" ws colref ws ")"
+pl-len ::= "pl.len" ws "(" ws ")"
+pl-date ::= "pl.date" ws "(" ws int-val ws "," ws int-val ws "," ws int-val ws ")"
+paren-expr ::= "(" ws expr ws ")"
+expr-atom ::= col-atom |
+  pl-len |
+  pl-date |
+  paren-expr
+literal-atom ::= float-val |
+  int-val |
+  colstr |
+  identstr |
+  bool-val
+atom-with-methods ::= expr-atom expr-method* | literal-atom
+unary ::= "-" ws atom-with-methods | atom-with-methods
+prod-op ::= "*" | "/"
+prod-expr ::= unary (ws prod-op ws unary)*
+sum-op ::= "+" | "-"
+sum-expr ::= prod-expr (ws sum-op ws prod-expr)*
+cmp-op ::= "==" |
+  "!=" |
+  "<=" |
+  ">=" |
+  "<" |
+  ">"
+cmp-rhs ::= sum-expr | string
+cmp-expr ::= sum-expr (ws cmp-op ws cmp-rhs)?
+not-expr ::= "~" ws not-expr | cmp-expr
+and-expr ::= not-expr (ws "&" ws not-expr)*
+expr ::= and-expr (ws "|" ws and-expr)*
+expr-list ::= "[" ws expr (ws "," ws expr)* (ws ",")? ws "]"
+expr-or-list ::= expr | expr-list
+filter-call ::= "filter" ws "(" ws expr ws ")"
+select-call ::= "select" ws "(" ws expr-or-list ws ")"
+with-cols-call ::= "with_columns" ws "(" ws expr-or-list ws ")"
+group-by-agg-call ::= "group_by" ws "(" ws colref-or-list ws ")" ws "." ws "agg" ws "(" ws expr-or-list ws ")"
+sort-call ::= "sort" ws "(" ws (colref | "[" ws colref (ws "," ws colref)* (ws ",")? ws "]") (ws "," ws "descending" ws "=" ws (bool-val | "[" ws bool-val (ws "," ws bool-val)* (ws ",")? ws "]"))? ws ")"
+head-call ::= "head" ws "(" ws int-val ws ")"
+limit-call ::= "limit" ws "(" ws int-val ws ")"
+unique-call ::= "unique" ws "(" ws colref-or-list? ws ")"
+rename-pair ::= colref ws ":" ws string
+rename-call ::= "rename" ws "(" ws "{" ws rename-pair (ws "," ws rename-pair)* (ws ",")? ws "}" ws ")"
+join-kw ::= "left_on" ws "=" ws colref |
+  "right_on" ws "=" ws colref |
+  "on" ws "=" ws colref-or-list |
+  "how" ws "=" ws string
+join-call ::= "join" ws "(" ws tablename (ws "," ws join-kw)+ ws ")"
+meth-call ::= filter-call |
+  select-call |
+  with-cols-call |
+  group-by-agg-call |
+  join-call |
+  sort-call |
+  head-call |
+  limit-call |
+  unique-call |
+  rename-call
+chain-method ::= "." ws meth-call
+pipeline ::= tablename (ws chain-method)+
+rhs ::= "(" ws pipeline ws ")" | pipeline
+assign ::= "result" ws "=" ws rhs
+
