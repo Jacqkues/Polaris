@@ -36,7 +36,20 @@ Dates:
 
 Aggregation:
 - `pl.len()` for row count; use `.alias("name")` to rename outputs.
-- For top-N per group use a window + filter, or sort+group_by+head."""
+- For top-N per group use a window + filter, or sort+group_by+head.
+
+Output shape (critical — the output columns must match what the question asks for):
+- After a join, ALWAYS end with `.select([...])` listing only the columns the
+  question actually mentions. Never leave all joined columns in the output.
+- For an ungrouped count (the question asks "how many X" without partition),
+  use `.select(pl.len().alias(...))`. Do NOT use `.group_by(pl.lit(None)).agg(...)`:
+  that creates a spurious "literal" column in the output.
+- ALWAYS add `.alias(...)` to aggregation expressions. An un-aliased
+  `pl.col("x").n_unique()` keeps the column name "x", which is almost never
+  what the question asks for. Same for `.sum()`, `.mean()`, `.max()`, etc.
+- When grouping by an expression (not a plain column), alias the expression:
+  `.group_by(pl.col("d").dt.year().alias("year"))`. Otherwise the group column
+  is named after the raw expression, not after the concept it represents."""
 
 
 FEWSHOT: list[tuple[dict, str, str]] = [
