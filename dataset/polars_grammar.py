@@ -48,8 +48,7 @@ method: "." meth_call
 ?meth_call: filter_call
           | select_call
           | with_cols_call
-          | group_by_call
-          | agg_call
+          | group_by_agg_call
           | join_call
           | sort_call
           | head_call
@@ -63,9 +62,11 @@ select_call: "select" "(" expr_or_list ")"
 
 with_cols_call: "with_columns" "(" expr_or_list ")"
 
-agg_call: "agg" "(" expr_or_list ")"
-
-group_by_call: "group_by" "(" colref_or_list ")"
+// .agg is only legal on a GroupBy, so it must immediately follow .group_by.
+// Collapsing both into one rule keeps the grammar context-free while
+// preventing `df.agg(...)` (which Polars rejects at runtime — there's no
+// other way to enforce the required sequence).
+group_by_agg_call: "group_by" "(" colref_or_list ")" "." "agg" "(" expr_or_list ")"
 
 sort_call: "sort" "(" sort_key ("," sort_kw)? ")"
 sort_key: colref | colref_list
@@ -255,16 +256,14 @@ tableref ::= tablename
 
 method ::= "." ws methcall
 
-methcall ::= filtercall | selectcall | withcolscall | groupbycall
-           | aggcall | joincall | sortcall | headcall | limitcall
+methcall ::= filtercall | selectcall | withcolscall | groupbyaggcall
+           | joincall | sortcall | headcall | limitcall
            | uniquecall | renamecall
 
 filtercall ::= "filter" ws "(" ws expr ws ")"
 selectcall ::= "select" ws "(" ws exprorlist ws ")"
 withcolscall ::= "with_columns" ws "(" ws exprorlist ws ")"
-aggcall ::= "agg" ws "(" ws exprorlist ws ")"
-
-groupbycall ::= "group_by" ws "(" ws colreforlist ws ")"
+groupbyaggcall ::= "group_by" ws "(" ws colreforlist ws ")" ws "." ws "agg" ws "(" ws exprorlist ws ")"
 
 sortcall ::= "sort" ws "(" ws sortkey (ws "," ws sortkw)? ws ")"
 sortkey ::= colref | colreflist
@@ -506,6 +505,8 @@ def _self_test() -> int:
         ("unquoted-col-in-pl.col", 'result = customer.filter(pl.col(c_name) == "X")'),
         ("chain-with-no-method", 'result = customer'),
         ("raw-python-expr", 'result = sum([1,2,3])'),
+        ("agg-without-groupby", 'result = customer.agg(pl.col("c_custkey").sum())'),
+        ("agg-after-filter-not-groupby", 'result = customer.filter(pl.col("c_custkey") > 0).agg(pl.len())'),
         ("distinct-not-polars", 'result = customer.distinct()'),
         ("string-literal-chained-over", 'result = customer.select("c_name".over("c_custkey"))'),
         # Gibberish-in-pl.col (backtick, comma, spaces) is rejected. Plain

@@ -42,10 +42,11 @@ Rules:
 - The provided DataFrames are already in scope by name — do not recreate them with pl.DataFrame()."""
 
 
-FEWSHOT: list[tuple[dict, str, str]] = [
+FEWSHOT: list[tuple[dict, str, list[str], str]] = [
     (
         {"sales": {"product": "Utf8", "revenue": "Float64", "region": "Utf8"}},
         "Return all sales in Europe with revenue above 100, sorted by revenue descending.",
+        ["product", "revenue", "region"],
         'result = (\n'
         '    sales\n'
         '    .filter((pl.col("region") == "Europe") & (pl.col("revenue") > 100))\n'
@@ -55,6 +56,7 @@ FEWSHOT: list[tuple[dict, str, str]] = [
     (
         {"events": {"user_id": "Int64", "event_type": "Utf8", "ts": "Datetime"}},
         "Count events per event_type for 2024, sorted by count descending.",
+        ["event_type", "count"],
         'result = (\n'
         '    events\n'
         '    .filter(pl.col("ts").dt.year() == 2024)\n'
@@ -69,6 +71,7 @@ FEWSHOT: list[tuple[dict, str, str]] = [
             "orders": {"order_id": "Int64", "user_id": "Int64", "amount": "Float64"},
         },
         "For each user, return the total amount of their orders, top 5.",
+        ["name", "total"],
         'result = (\n'
         '    users\n'
         '    .join(orders, on="user_id")\n'
@@ -104,11 +107,20 @@ def format_schema(tables: dict) -> str:
     return "\n".join(lines)
 
 
-def format_user_turn(tables: dict, question: str) -> str:
-    return (
-        f"Schema:\n{format_schema(tables)}\n\n"
-        f"Question: {question}"
-    )
+def format_user_turn(
+    tables: dict, question: str, expected_columns: list[str] | None = None,
+) -> str:
+    parts = [
+        f"Schema:\n{format_schema(tables)}",
+        f"Question: {question}",
+    ]
+    if expected_columns:
+        cols_repr = ", ".join(f'"{c}"' for c in expected_columns)
+        parts.append(
+            f"Expected output columns (use these exact names, via .alias() "
+            f"when needed): [{cols_repr}]"
+        )
+    return "\n\n".join(parts)
 
 
 def strip_code_fence(text: str) -> str:
@@ -135,12 +147,20 @@ class PolarisModel:
         self._xgr_tokinfo = None
         self._xgr_compiler = None
 
-    def _build_prompt(self, message: str, tables: dict) -> str:
+    def _build_prompt(
+        self,
+        message: str,
+        tables: dict,
+        expected_columns: list[str] | None = None,
+    ) -> str:
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for fs_tables, fs_q, fs_a in FEWSHOT:
-            messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q)})
+        for fs_tables, fs_q, fs_cols, fs_a in FEWSHOT:
+            messages.append({"role": "user", "content": format_user_turn(fs_tables, fs_q, fs_cols)})
             messages.append({"role": "assistant", "content": fs_a})
-        messages.append({"role": "user", "content": format_user_turn(tables, message)})
+        messages.append({
+            "role": "user",
+            "content": format_user_turn(tables, message, expected_columns),
+        })
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -183,8 +203,14 @@ class PolarisModel:
         raise RuntimeError("could not resolve vocab_size from model config")
 
     @torch.inference_mode()
-    def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
-        text = self._build_prompt(message, tables)
+    def generate(
+        self,
+        message: str,
+        tables: dict,
+        max_new_tokens: int = 512,
+        expected_columns: list[str] | None = None,
+    ) -> str:
+        text = self._build_prompt(message, tables, expected_columns)
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(
             **inputs,
@@ -201,7 +227,11 @@ class PolarisModel:
 
     @torch.inference_mode()
     def generate_constrained(
-        self, message: str, tables: dict, max_new_tokens: int = 512,
+        self,
+        message: str,
+        tables: dict,
+        max_new_tokens: int = 512,
+        expected_columns: list[str] | None = None,
     ) -> str:
         """Grammar-constrained decoding driven directly by xgrammar.
 
@@ -213,7 +243,7 @@ class PolarisModel:
         """
         self._ensure_xgrammar()
         xgr = self._xgr
-        prompt = self._build_prompt(message, tables)
+        prompt = self._build_prompt(message, tables, expected_columns)
         grammar_str = build_grammar_gbnf(tables)
 
         compiled = self._xgr_compiler.compile_grammar(grammar_str)
@@ -449,11 +479,16 @@ def run(
             generated = rec["reference_code"]
             gen_error = None
         else:
+            expected_cols = rec.get("expected_columns")
             try:
                 if constrained:
-                    generated = model.generate_constrained(rec["question"], prompt_schemas)
+                    generated = model.generate_constrained(
+                        rec["question"], prompt_schemas, expected_columns=expected_cols,
+                    )
                 else:
-                    generated = model.generate(rec["question"], prompt_schemas)
+                    generated = model.generate(
+                        rec["question"], prompt_schemas, expected_columns=expected_cols,
+                    )
                 gen_error = None
             except Exception as e:
                 generated = ""
