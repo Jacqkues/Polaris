@@ -122,18 +122,39 @@ class PolarisModel:
     def _ensure_xgrammar(self) -> None:
         """Build the xgrammar tokenizer-info + compiler once and reuse.
 
-        Uses `model.config.vocab_size` (which accounts for LM-head padding)
-        rather than `tokenizer.vocab_size`, which under-reports for LFM2.5 and
-        causes `token_bitmask.shape` mismatches in downstream masking.
+        Uses the model's LM-head width as vocab_size (which accounts for
+        padding) rather than `tokenizer.vocab_size`, which under-reports for
+        several modern tokenizers and causes `token_bitmask.shape` mismatches
+        in downstream masking. Handles nested configs (Gemma 4, LFM, etc.)
+        which expose vocab_size on a sub-config.
         """
-        if self._xgr is None:
-            import xgrammar as xgr
-            self._xgr = xgr
-            vocab_size = self.model.config.vocab_size
-            self._xgr_tokinfo = xgr.TokenizerInfo.from_huggingface(
-                self.tokenizer, vocab_size=vocab_size
-            )
-            self._xgr_compiler = xgr.GrammarCompiler(self._xgr_tokinfo)
+        if self._xgr_compiler is not None:
+            return
+        import xgrammar as xgr
+
+        vocab_size = self._resolve_vocab_size()
+        tokinfo = xgr.TokenizerInfo.from_huggingface(
+            self.tokenizer, vocab_size=vocab_size
+        )
+        compiler = xgr.GrammarCompiler(tokinfo)
+        # Only commit to self after every step succeeds so a partial init
+        # doesn't fool later callers into thinking we're ready.
+        self._xgr = xgr
+        self._xgr_tokinfo = tokinfo
+        self._xgr_compiler = compiler
+
+    def _resolve_vocab_size(self) -> int:
+        cfg = self.model.config
+        if getattr(cfg, "vocab_size", None):
+            return int(cfg.vocab_size)
+        for sub in ("text_config", "language_config", "llm_config"):
+            sub_cfg = getattr(cfg, sub, None)
+            if sub_cfg is not None and getattr(sub_cfg, "vocab_size", None):
+                return int(sub_cfg.vocab_size)
+        out = self.model.get_output_embeddings()
+        if out is not None:
+            return int(out.weight.shape[0])
+        raise RuntimeError("could not resolve vocab_size from model config")
 
     @torch.inference_mode()
     def generate(self, message: str, tables: dict, max_new_tokens: int = 512) -> str:
