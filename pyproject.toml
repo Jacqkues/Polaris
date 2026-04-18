@@ -3,7 +3,7 @@ name = "polaris"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "accelerate>=1.13.0",
     "datasets>=3.0.0",
@@ -13,7 +13,7 @@ dependencies = [
     "outlines>=1.2.12",
     "polars>=1.20.0",
     "pydantic>=2.13.2",
-    "torch>=2.11.0",
+    "torch>=2.10.0",
     "transformers>=5.5.4",
     "vllm>=0.19.1",
     "xgrammar>=0.1.33",
