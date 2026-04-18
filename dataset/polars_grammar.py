@@ -56,7 +56,6 @@ method: "." meth_call
           | limit_call
           | unique_call
           | rename_call
-          | distinct_call
 
 filter_call: "filter" "(" expr ")"
 
@@ -76,7 +75,6 @@ head_call: "head" "(" INT ")"
 limit_call: "limit" "(" INT ")"
 
 unique_call: "unique" "(" (colref_or_list)? ")"
-distinct_call: "distinct" "(" (colref_or_list)? ")"
 
 rename_call: "rename" "(" "{" rename_pair ("," rename_pair)* "}" ")"
 rename_pair: colref ":" STRING
@@ -112,17 +110,10 @@ expr_list: "[" expr ("," expr)* ","? "]"
 !prod_op: "*" | "/"
 ?unary: "-" atom_with_methods | atom_with_methods
 
-atom_with_methods: atom (expr_method)*
+atom_with_methods: expr_atom (expr_method)* | literal_atom
 
-?atom: col_atom
-     | pl_len
-     | pl_date
-     | paren_expr
-     | FLOAT
-     | INT
-     | STRING
-     | COLSTR
-     | BOOL
+?expr_atom: col_atom | pl_len | pl_date | paren_expr
+?literal_atom: FLOAT | INT | STRING | COLSTR | BOOL
 
 paren_expr: "(" expr ")"
 col_atom: "pl.col" "(" colref ")"
@@ -256,7 +247,7 @@ method ::= "." ws methcall
 
 methcall ::= filtercall | selectcall | withcolscall | groupbycall
            | aggcall | joincall | sortcall | headcall | limitcall
-           | uniquecall | renamecall | distinctcall
+           | uniquecall | renamecall
 
 filtercall ::= "filter" ws "(" ws expr ws ")"
 selectcall ::= "select" ws "(" ws exprorlist ws ")"
@@ -273,7 +264,6 @@ headcall ::= "head" ws "(" ws int ws ")"
 limitcall ::= "limit" ws "(" ws int ws ")"
 
 uniquecall ::= "unique" ws "(" ws (colreforlist)? ws ")"
-distinctcall ::= "distinct" ws "(" ws (colreforlist)? ws ")"
 
 renamecall ::= "rename" ws "(" ws "{" ws renamepair (ws "," ws renamepair)* (ws ",")? ws "}" ws ")"
 renamepair ::= colref ws ":" ws string
@@ -303,9 +293,10 @@ prodexpr ::= unary (ws prodop ws unary)*
 prodop ::= "*" | "/"
 unary ::= "-" ws atomwithmethods | atomwithmethods
 
-atomwithmethods ::= atom (exprmethod)*
+atomwithmethods ::= expratom (exprmethod)* | literalatom
 
-atom ::= colatom | pllen | pldate | parenexpr | float | int | string | colstr | bool
+expratom ::= colatom | pllen | pldate | parenexpr
+literalatom ::= float | int | string | colstr | bool
 
 parenexpr ::= "(" ws expr ws ")"
 colatom ::= "pl.col" ws "(" ws colref ws ")"
@@ -470,7 +461,6 @@ def _self_test() -> int:
         ),
         ("neg_literal", 'result = customer.filter(pl.col("c_acctbal") > -100).head(5)'),
         ("bool_literal_false", 'result = orders.sort("o_totalprice", descending=False).head(3)'),
-        ("distinct_alias", 'result = customer.distinct()'),
     ]
     pos_extra_ok = 0
     for name, code in pos_extra:
@@ -504,6 +494,8 @@ def _self_test() -> int:
         ("unquoted-col-in-pl.col", 'result = customer.filter(pl.col(c_name) == "X")'),
         ("chain-with-no-method", 'result = customer'),
         ("raw-python-expr", 'result = sum([1,2,3])'),
+        ("distinct-not-polars", 'result = customer.distinct()'),
+        ("string-literal-chained-over", 'result = customer.select("c_name".over("c_custkey"))'),
     ]
     neg_pass = 0
     for name, code in neg_cases:
